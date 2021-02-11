@@ -1,0 +1,7 @@
+"Epic","Feature","Story","FAILED","BROKEN","PASSED","SKIPPED","UNKNOWN"
+"Regression","Login","Login","0","1","0","0","0"
+"Regression","","Test Title","0","1","0","0","0"
+"","","","0","2","0","0","0"
+"Regression","","Message","0","1","0","0","0"
+"Regression","Login","Logo","0","0","1","0","0"
+"Regression","Login","","0","0","1","0","0"

@@ -1,0 +1,74 @@
+{
+  "uid" : "9b3c4d6777e3449",
+  "name" : "Message Description",
+  "fullName" : "com.crm.qa.testcases.FreeCrmTest.getRunTimeInfoMessage",
+  "historyId" : "dcd49442c521be822f57224808245b7d",
+  "time" : {
+    "start" : 1612984664217,
+    "stop" : 1612984664217,
+    "duration" : 0
+  },
+  "status" : "broken",
+  "statusMessage" : "\nCannot inject @Test annotated Method [getRunTimeInfoMessage] with [class java.lang.String, class java.lang.String].\nFor more information on native dependency injection please refer to http://testng.org/doc/documentation-main.html#native-dependency-injection",
+  "statusTrace" : "org.testng.TestNGException: \nCannot inject @Test annotated Method [getRunTimeInfoMessage] with [class java.lang.String, class java.lang.String].\nFor more information on native dependency injection please refer to http://testng.org/doc/documentation-main.html#native-dependency-injection\r\n\tat org.testng.internal.Parameters.checkParameterTypes(Parameters.java:244)\r\n\tat org.testng.internal.Parameters.createParameters(Parameters.java:172)\r\n\tat org.testng.internal.Parameters.createParameters(Parameters.java:458)\r\n\tat org.testng.internal.Parameters.handleParameters(Parameters.java:569)\r\n\tat org.testng.internal.Invoker.handleParameters(Invoker.java:1308)\r\n\tat org.testng.internal.Invoker.createParameters(Invoker.java:1036)\r\n\tat org.testng.internal.Invoker.invokeTestMethods(Invoker.java:1126)\r\n\tat org.testng.internal.TestMethodWorker.invokeTestMethods(TestMethodWorker.java:126)\r\n\tat org.testng.internal.TestMethodWorker.run(TestMethodWorker.java:109)\r\n\tat org.testng.TestRunner.privateRun(TestRunner.java:744)\r\n\tat org.testng.TestRunner.run(TestRunner.java:602)\r\n\tat org.testng.SuiteRunner.runTest(SuiteRunner.java:380)\r\n\tat org.testng.SuiteRunner.runSequentially(SuiteRunner.java:375)\r\n\tat org.testng.SuiteRunner.privateRun(SuiteRunner.java:340)\r\n\tat org.testng.SuiteRunner.run(SuiteRunner.java:289)\r\n\tat org.testng.SuiteRunnerWorker.runSuite(SuiteRunnerWorker.java:52)\r\n\tat org.testng.SuiteRunnerWorker.run(SuiteRunnerWorker.java:86)\r\n\tat org.testng.TestNG.runSuitesSequentially(TestNG.java:1301)\r\n\tat org.testng.TestNG.runSuitesLocally(TestNG.java:1226)\r\n\tat org.testng.TestNG.runSuites(TestNG.java:1144)\r\n\tat org.testng.TestNG.run(TestNG.java:1115)\r\n\tat org.testng.remote.AbstractRemoteTestNG.run(AbstractRemoteTestNG.java:115)\r\n\tat org.testng.remote.RemoteTestNG.initAndRun(RemoteTestNG.java:251)\r\n\tat org.testng.remote.RemoteTestNG.main(RemoteTestNG.java:77)\r\n",
+  "flaky" : false,
+  "newFailed" : false,
+  "beforeStages" : [ ],
+  "afterStages" : [ ],
+  "labels" : [ {
+    "name" : "package",
+    "value" : "com.crm.qa.testcases.FreeCrmTest"
+  }, {
+    "name" : "testClass",
+    "value" : "com.crm.qa.testcases.FreeCrmTest"
+  }, {
+    "name" : "testMethod",
+    "value" : "getRunTimeInfoMessage"
+  }, {
+    "name" : "parentSuite",
+    "value" : "FREE CRM Application Test Automation Test Suite"
+  }, {
+    "name" : "suite",
+    "value" : "Free CRM App Test Cases"
+  }, {
+    "name" : "subSuite",
+    "value" : "com.crm.qa.testcases.FreeCrmTest"
+  }, {
+    "name" : "host",
+    "value" : "DESKTOP-KO4M71V"
+  }, {
+    "name" : "thread",
+    "value" : "22332@DESKTOP-KO4M71V.main(1)"
+  }, {
+    "name" : "framework",
+    "value" : "testng"
+  }, {
+    "name" : "language",
+    "value" : "java"
+  }, {
+    "name" : "story",
+    "value" : "Message"
+  }, {
+    "name" : "epic",
+    "value" : "Regression"
+  }, {
+    "name" : "resultFormat",
+    "value" : "allure2"
+  } ],
+  "parameters" : [ ],
+  "links" : [ ],
+  "hidden" : false,
+  "retry" : false,
+  "extra" : {
+    "severity" : "normal",
+    "retries" : [ ],
+    "categories" : [ {
+      "name" : "Test defects",
+      "matchedStatuses" : [ ],
+      "flaky" : false
+    } ],
+    "tags" : [ ]
+  },
+  "source" : "9b3c4d6777e3449.json",
+  "parameterValues" : [ ]
+}

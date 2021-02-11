@@ -1,0 +1,124 @@
+{
+  "uid" : "98d3104e051c652961429bf95fa0b5d6",
+  "name" : "suites",
+  "children" : [ {
+    "name" : "Default suite",
+    "children" : [ {
+      "name" : "Default test",
+      "children" : [ {
+        "name" : "com.crm.qa.testcases.LoginPageTest",
+        "children" : [ {
+          "name" : "tearDown",
+          "uid" : "d895e90ceef50a",
+          "parentUid" : "2bbfad16f1a4c9596eaa0f93308abbd0",
+          "status" : "broken",
+          "time" : {
+            "start" : 1612979747480,
+            "stop" : 1612979747481,
+            "duration" : 1
+          },
+          "flaky" : false,
+          "newFailed" : false,
+          "parameters" : [ ]
+        }, {
+          "name" : "Invalid Login Scenario with wrong username and password.",
+          "uid" : "7ad83df5ff508a19",
+          "parentUid" : "2bbfad16f1a4c9596eaa0f93308abbd0",
+          "status" : "broken",
+          "time" : {
+            "start" : 1612979858287,
+            "stop" : 1612979858289,
+            "duration" : 2
+          },
+          "flaky" : false,
+          "newFailed" : false,
+          "parameters" : [ ]
+        } ],
+        "uid" : "2bbfad16f1a4c9596eaa0f93308abbd0"
+      } ],
+      "uid" : "848117670d75f6868e681771989ad50e"
+    } ],
+    "uid" : "2c8837b97293ea01a164a5cd7048ad56"
+  }, {
+    "name" : "FREE CRM Application Test Automation Test Suite",
+    "children" : [ {
+      "name" : "Free CRM App Test Cases",
+      "children" : [ {
+        "name" : "com.crm.qa.testcases.FreeCrmTest",
+        "children" : [ {
+          "name" : "Test Title description",
+          "uid" : "c2271d9ae9b99582",
+          "parentUid" : "bd0d6c3878781f6f5794a4c8c7cbaf55",
+          "status" : "broken",
+          "time" : {
+            "start" : 1612984643625,
+            "stop" : 1612984664199,
+            "duration" : 20574
+          },
+          "flaky" : false,
+          "newFailed" : false,
+          "parameters" : [ ]
+        }, {
+          "name" : "Message Description",
+          "uid" : "9b3c4d6777e3449",
+          "parentUid" : "bd0d6c3878781f6f5794a4c8c7cbaf55",
+          "status" : "broken",
+          "time" : {
+            "start" : 1612984664217,
+            "stop" : 1612984664217,
+            "duration" : 0
+          },
+          "flaky" : false,
+          "newFailed" : false,
+          "parameters" : [ ]
+        } ],
+        "uid" : "bd0d6c3878781f6f5794a4c8c7cbaf55"
+      }, {
+        "name" : "com.crm.qa.testcases.LoginPageTest",
+        "children" : [ {
+          "name" : "Login Scenario",
+          "uid" : "df312de5667e4f67",
+          "parentUid" : "bc2bfe114a2a1d66ed9c9dfac320c556",
+          "status" : "passed",
+          "time" : {
+            "start" : 1612984679584,
+            "stop" : 1612984680177,
+            "duration" : 593
+          },
+          "flaky" : false,
+          "newFailed" : false,
+          "parameters" : [ ]
+        }, {
+          "name" : "crmLogoImageTest",
+          "uid" : "184fd9cd2a5376b6",
+          "parentUid" : "bc2bfe114a2a1d66ed9c9dfac320c556",
+          "status" : "passed",
+          "time" : {
+            "start" : 1612984697257,
+            "stop" : 1612984697902,
+            "duration" : 645
+          },
+          "flaky" : false,
+          "newFailed" : false,
+          "parameters" : [ ]
+        }, {
+          "name" : "loginTest",
+          "uid" : "396f7fb39fb8cedc",
+          "parentUid" : "bc2bfe114a2a1d66ed9c9dfac320c556",
+          "status" : "broken",
+          "time" : {
+            "start" : 1612984713366,
+            "stop" : 1612984715847,
+            "duration" : 2481
+          },
+          "flaky" : false,
+          "newFailed" : false,
+          "parameters" : [ ]
+        } ],
+        "uid" : "bc2bfe114a2a1d66ed9c9dfac320c556"
+      } ],
+      "uid" : "c9bbbd195deaf626c271ec640d8cd3d8"
+    } ],
+    "uid" : "9a22895018bcc40295e7492a7329ec6e"
+  } ]
+}

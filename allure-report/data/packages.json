@@ -1,0 +1,108 @@
+{
+  "uid" : "83edc06c07f9ae9e47eb6dd1b683e4e2",
+  "name" : "packages",
+  "children" : [ {
+    "name" : "com.crm.qa.testcases",
+    "children" : [ {
+      "name" : "LoginPageTest",
+      "children" : [ {
+        "name" : "tearDown",
+        "uid" : "d895e90ceef50a",
+        "parentUid" : "bb5349ada0bc79e26fdf1daac9fbef6e",
+        "status" : "broken",
+        "time" : {
+          "start" : 1612979747480,
+          "stop" : 1612979747481,
+          "duration" : 1
+        },
+        "flaky" : false,
+        "newFailed" : false,
+        "parameters" : [ ]
+      }, {
+        "name" : "setUp",
+        "uid" : "7ad83df5ff508a19",
+        "parentUid" : "bb5349ada0bc79e26fdf1daac9fbef6e",
+        "status" : "broken",
+        "time" : {
+          "start" : 1612979858287,
+          "stop" : 1612979858289,
+          "duration" : 2
+        },
+        "flaky" : false,
+        "newFailed" : false,
+        "parameters" : [ ]
+      }, {
+        "name" : "loginPageTitleTest",
+        "uid" : "df312de5667e4f67",
+        "parentUid" : "bb5349ada0bc79e26fdf1daac9fbef6e",
+        "status" : "passed",
+        "time" : {
+          "start" : 1612984679584,
+          "stop" : 1612984680177,
+          "duration" : 593
+        },
+        "flaky" : false,
+        "newFailed" : false,
+        "parameters" : [ ]
+      }, {
+        "name" : "crmLogoImageTest",
+        "uid" : "184fd9cd2a5376b6",
+        "parentUid" : "bb5349ada0bc79e26fdf1daac9fbef6e",
+        "status" : "passed",
+        "time" : {
+          "start" : 1612984697257,
+          "stop" : 1612984697902,
+          "duration" : 645
+        },
+        "flaky" : false,
+        "newFailed" : false,
+        "parameters" : [ ]
+      }, {
+        "name" : "loginTest",
+        "uid" : "396f7fb39fb8cedc",
+        "parentUid" : "bb5349ada0bc79e26fdf1daac9fbef6e",
+        "status" : "broken",
+        "time" : {
+          "start" : 1612984713366,
+          "stop" : 1612984715847,
+          "duration" : 2481
+        },
+        "flaky" : false,
+        "newFailed" : false,
+        "parameters" : [ ]
+      } ],
+      "uid" : "bb5349ada0bc79e26fdf1daac9fbef6e"
+    }, {
+      "name" : "FreeCrmTest",
+      "children" : [ {
+        "name" : "freeCrmTitleTest",
+        "uid" : "c2271d9ae9b99582",
+        "parentUid" : "bf6da6d01d581cdbdd07cb5537dd6ff9",
+        "status" : "broken",
+        "time" : {
+          "start" : 1612984643625,
+          "stop" : 1612984664199,
+          "duration" : 20574
+        },
+        "flaky" : false,
+        "newFailed" : false,
+        "parameters" : [ ]
+      }, {
+        "name" : "getRunTimeInfoMessage",
+        "uid" : "9b3c4d6777e3449",
+        "parentUid" : "bf6da6d01d581cdbdd07cb5537dd6ff9",
+        "status" : "broken",
+        "time" : {
+          "start" : 1612984664217,
+          "stop" : 1612984664217,
+          "duration" : 0
+        },
+        "flaky" : false,
+        "newFailed" : false,
+        "parameters" : [ ]
+      } ],
+      "uid" : "bf6da6d01d581cdbdd07cb5537dd6ff9"
+    } ],
+    "uid" : "com.crm.qa.testcases"
+  } ]
+}

@@ -1,0 +1,71 @@
+[ {
+  "uid" : "9b3c4d6777e3449",
+  "name" : "Message Description",
+  "time" : {
+    "start" : 1612984664217,
+    "stop" : 1612984664217,
+    "duration" : 0
+  },
+  "status" : "broken",
+  "severity" : "normal"
+}, {
+  "uid" : "7ad83df5ff508a19",
+  "name" : "Invalid Login Scenario with wrong username and password.",
+  "time" : {
+    "start" : 1612979858287,
+    "stop" : 1612979858289,
+    "duration" : 2
+  },
+  "status" : "broken",
+  "severity" : "normal"
+}, {
+  "uid" : "184fd9cd2a5376b6",
+  "name" : "crmLogoImageTest",
+  "time" : {
+    "start" : 1612984697257,
+    "stop" : 1612984697902,
+    "duration" : 645
+  },
+  "status" : "passed",
+  "severity" : "normal"
+}, {
+  "uid" : "396f7fb39fb8cedc",
+  "name" : "loginTest",
+  "time" : {
+    "start" : 1612984713366,
+    "stop" : 1612984715847,
+    "duration" : 2481
+  },
+  "status" : "broken",
+  "severity" : "normal"
+}, {
+  "uid" : "df312de5667e4f67",
+  "name" : "Login Scenario",
+  "time" : {
+    "start" : 1612984679584,
+    "stop" : 1612984680177,
+    "duration" : 593
+  },
+  "status" : "passed",
+  "severity" : "normal"
+}, {
+  "uid" : "c2271d9ae9b99582",
+  "name" : "Test Title description",
+  "time" : {
+    "start" : 1612984643625,
+    "stop" : 1612984664199,
+    "duration" : 20574
+  },
+  "status" : "broken",
+  "severity" : "normal"
+}, {
+  "uid" : "d895e90ceef50a",
+  "name" : "tearDown",
+  "time" : {
+    "start" : 1612979747480,
+    "stop" : 1612979747481,
+    "duration" : 1
+  },
+  "status" : "broken",
+  "severity" : "normal"
+} ]
