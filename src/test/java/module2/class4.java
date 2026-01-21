@@ -31,7 +31,7 @@ import org.testng.annotations.Test;
 	
 	@Test 
 	public void test2() {
-		System.out.println("test42 executed");
+		System.out.println("test42 hello executed");
 	}
 	
 	@AfterMethod
