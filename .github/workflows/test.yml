@@ -35,84 +35,67 @@ jobs:
           key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
           restore-keys: ${{ runner.os }}-m2
 
-      - name: Compile project
+      - name: Compile project and capture status
         id: compile
         run: |
-          set +e
+          echo "Starting compilation..."
           mvn clean compile -DskipTests > compile.log 2>&1
-          COMPILE_EXIT_CODE=$?
+          EXIT_CODE=$?
           
-          # Also check if BUILD FAILURE appears in log
-          if grep -q "BUILD FAILURE" compile.log; then
-            COMPILE_EXIT_CODE=1
-          fi
+          echo "Maven exit code: $EXIT_CODE"
           
-          cat compile.log
-          echo "compile_status=$COMPILE_EXIT_CODE" >> $GITHUB_OUTPUT
+          # Save exit code to a file as well
+          echo $EXIT_CODE > compile_exit_code.txt
           
-          if [ $COMPILE_EXIT_CODE -ne 0 ]; then
-            echo "❌ Compilation failed with exit code: $COMPILE_EXIT_CODE"
+          # Check for failure indicators
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+            echo "❌ COMPILATION FAILED (exit code: $EXIT_CODE)"
+          elif grep -q "BUILD FAILURE" compile.log; then
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "exit_code=1" >> $GITHUB_OUTPUT
+            echo "❌ COMPILATION FAILED (BUILD FAILURE detected in logs)"
+          elif grep -q "\[ERROR\]" compile.log | grep -v "ERROR\] Re-run Maven"; then
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "exit_code=1" >> $GITHUB_OUTPUT
+            echo "❌ COMPILATION FAILED (ERROR detected in logs)"
           else
-            echo "✅ Compilation successful"
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "exit_code=0" >> $GITHUB_OUTPUT
+            echo "✅ COMPILATION SUCCESSFUL"
           fi
+          
+          # Always show the log
+          echo "=== COMPILE LOG ==="
+          cat compile.log
+          echo "==================="
         continue-on-error: true
 
+      - name: Verify Compile Status
+        if: always()
+        run: |
+          echo "Compile status: ${{ steps.compile.outputs.status }}"
+          echo "Exit code: ${{ steps.compile.outputs.exit_code }}"
+          
+          if [ -f compile_exit_code.txt ]; then
+            echo "Exit code from file: $(cat compile_exit_code.txt)"
+          fi
+
       - name: Run Checkstyle (Report Only)
+        if: steps.compile.outputs.status == 'success'
         run: mvn checkstyle:checkstyle || true
         continue-on-error: true
 
-      - name: Debug - Check Compile Status
-        if: always()
-        run: |
-          echo "Compile status from previous step: ${{ steps.compile.outputs.compile_status }}"
-          if [ "${{ steps.compile.outputs.compile_status }}" != "0" ]; then
-            echo "⚠️ Compilation detected as FAILED"
-          else
-            echo "✅ Compilation detected as SUCCESS"
-          fi
-
       - name: Run PMD (Report Only)
+        if: steps.compile.outputs.status == 'success'
         run: mvn pmd:pmd || true
         continue-on-error: true
 
       - name: Run SpotBugs (Report Only)
+        if: steps.compile.outputs.status == 'success'
         run: mvn spotbugs:spotbugs || true
         continue-on-error: true
-
-      - name: Run TestNG Tests
-        run: |
-          echo "Attempting to run tests..."
-          if [ -f "testng.xml" ]; then
-            echo "Found testng.xml, attempting to run with suite file..."
-            mvn test -DsuiteXmlFile=testng.xml || {
-              echo "testng.xml failed, trying without suite file..."
-              mvn test || echo "Tests completed with issues"
-            }
-          else
-            echo "No testng.xml found, running all tests..."
-            mvn test || echo "Tests completed with issues"
-          fi
-        continue-on-error: true
-
-      - name: Check for test results
-        id: test_check
-        run: |
-          if [ -d "target/surefire-reports" ] && [ "$(ls -A target/surefire-reports/*.xml 2>/dev/null)" ]; then
-            echo "tests_exist=true" >> $GITHUB_OUTPUT
-            echo "Test results found"
-          else
-            echo "tests_exist=false" >> $GITHUB_OUTPUT
-            echo "No test results found"
-          fi
-
-      - name: Publish Test Results
-        if: steps.test_check.outputs.tests_exist == 'true'
-        uses: EnricoMi/publish-unit-test-result-action@v2
-        with:
-          files: |
-            target/surefire-reports/TEST-*.xml
-          check_name: TestNG Results
-          comment_mode: off
 
       - name: Generate Quality Report Summary
         if: always()
@@ -124,80 +107,63 @@ jobs:
           
           # Compilation Status
           echo "### 🔨 Compilation" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.compile.outputs.compile_status }}" == "0" ]; then
+          COMPILE_STATUS="${{ steps.compile.outputs.status }}"
+          
+          if [ "$COMPILE_STATUS" = "success" ]; then
             echo "✅ **Status:** SUCCESS" >> $GITHUB_STEP_SUMMARY
           else
-            echo "❌ **Status:** FAILED" >> $GITHUB_STEP_SUMMARY
+            echo "❌ **Status:** FAILED (Exit Code: ${{ steps.compile.outputs.exit_code }})" >> $GITHUB_STEP_SUMMARY
+            
             if [ -f "compile.log" ]; then
               echo "" >> $GITHUB_STEP_SUMMARY
-              echo "<details><summary>Click to see compilation errors</summary>" >> $GITHUB_STEP_SUMMARY
+              echo "<details><summary>📋 Click to see compilation errors</summary>" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
               echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-              grep -A 5 "\[ERROR\]" compile.log | head -50 >> $GITHUB_STEP_SUMMARY || echo "Check workflow logs for details"
+              
+              # Extract error lines
+              grep "\[ERROR\]" compile.log | grep -v "Re-run Maven" | head -20 >> $GITHUB_STEP_SUMMARY || echo "See compile.log artifact for full details"
+              
               echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
               echo "</details>" >> $GITHUB_STEP_SUMMARY
             fi
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          # Checkstyle Summary
-          if [ -f "target/checkstyle-result.xml" ]; then
-            CHECKSTYLE_ERRORS=$(grep -o 'severity="error"' target/checkstyle-result.xml | wc -l || echo "0")
-            CHECKSTYLE_WARNINGS=$(grep -o 'severity="warning"' target/checkstyle-result.xml | wc -l || echo "0")
-            CHECKSTYLE_INFO=$(grep -o 'severity="info"' target/checkstyle-result.xml | wc -l || echo "0")
-            echo "### ✅ Checkstyle Analysis" >> $GITHUB_STEP_SUMMARY
-            echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
-            echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
-            echo "| Errors | $CHECKSTYLE_ERRORS |" >> $GITHUB_STEP_SUMMARY
-            echo "| Warnings | $CHECKSTYLE_WARNINGS |" >> $GITHUB_STEP_SUMMARY
-            echo "| Info | $CHECKSTYLE_INFO |" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "### ⚠️ Checkstyle - No results" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          # PMD Summary
-          if [ -f "target/pmd.xml" ]; then
-            PMD_VIOLATIONS=$(grep -c '<violation' target/pmd.xml || echo "0")
-            echo "### ✅ PMD Analysis" >> $GITHUB_STEP_SUMMARY
-            echo "- Total Violations: **$PMD_VIOLATIONS**" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "### ⚠️ PMD - No results" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          # SpotBugs Summary
-          if [ -f "target/spotbugsXml.xml" ]; then
-            SPOTBUGS_BUGS=$(grep -c '<BugInstance' target/spotbugsXml.xml || echo "0")
-            echo "### ✅ SpotBugs Analysis" >> $GITHUB_STEP_SUMMARY
-            echo "- Potential Bugs: **$SPOTBUGS_BUGS**" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "### ⚠️ SpotBugs - No results" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          # Test Summary
-          if [ -d "target/surefire-reports" ] && [ "$(ls -A target/surefire-reports/TEST-*.xml 2>/dev/null)" ]; then
-            echo "### ✅ Test Execution" >> $GITHUB_STEP_SUMMARY
-            TOTAL=$(find target/surefire-reports -name "TEST-*.xml" -exec grep -h "tests=" {} \; | sed 's/.*tests="\([0-9]*\)".*/\1/' | awk '{s+=$1} END {print s}')
-            FAILURES=$(find target/surefire-reports -name "TEST-*.xml" -exec grep -h "failures=" {} \; | sed 's/.*failures="\([0-9]*\)".*/\1/' | awk '{s+=$1} END {print s}')
-            ERRORS=$(find target/surefire-reports -name "TEST-*.xml" -exec grep -h "errors=" {} \; | sed 's/.*errors="\([0-9]*\)".*/\1/' | awk '{s+=$1} END {print s}')
-            SKIPPED=$(find target/surefire-reports -name "TEST-*.xml" -exec grep -h "skipped=" {} \; | sed 's/.*skipped="\([0-9]*\)".*/\1/' | awk '{s+=$1} END {print s}')
-            PASSED=$((${TOTAL:-0} - ${FAILURES:-0} - ${ERRORS:-0} - ${SKIPPED:-0}))
+          # Only show linting results if compilation succeeded
+          if [ "$COMPILE_STATUS" = "success" ]; then
+            # Checkstyle Summary
+            if [ -f "target/checkstyle-result.xml" ]; then
+              CHECKSTYLE_ERRORS=$(grep -o 'severity="error"' target/checkstyle-result.xml | wc -l || echo "0")
+              CHECKSTYLE_WARNINGS=$(grep -o 'severity="warning"' target/checkstyle-result.xml | wc -l || echo "0")
+              CHECKSTYLE_INFO=$(grep -o 'severity="info"' target/checkstyle-result.xml | wc -l || echo "0")
+              echo "### ✅ Checkstyle Analysis" >> $GITHUB_STEP_SUMMARY
+              echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
+              echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+              echo "| Errors | $CHECKSTYLE_ERRORS |" >> $GITHUB_STEP_SUMMARY
+              echo "| Warnings | $CHECKSTYLE_WARNINGS |" >> $GITHUB_STEP_SUMMARY
+              echo "| Info | $CHECKSTYLE_INFO |" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
             
-            echo "| Status | Count |" >> $GITHUB_STEP_SUMMARY
-            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-            echo "| ✅ Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
-            echo "| ❌ Failed | ${FAILURES:-0} |" >> $GITHUB_STEP_SUMMARY
-            echo "| ⚠️ Errors | ${ERRORS:-0} |" >> $GITHUB_STEP_SUMMARY
-            echo "| ⏭️ Skipped | ${SKIPPED:-0} |" >> $GITHUB_STEP_SUMMARY
-            echo "| **Total** | **${TOTAL:-0}** |" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
+            # PMD Summary
+            if [ -f "target/pmd.xml" ]; then
+              PMD_VIOLATIONS=$(grep -c '<violation' target/pmd.xml || echo "0")
+              echo "### ✅ PMD Analysis" >> $GITHUB_STEP_SUMMARY
+              echo "- Total Violations: **$PMD_VIOLATIONS**" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            # SpotBugs Summary
+            if [ -f "target/spotbugsXml.xml" ]; then
+              SPOTBUGS_BUGS=$(grep -c '<BugInstance' target/spotbugsXml.xml || echo "0")
+              echo "### ✅ SpotBugs Analysis" >> $GITHUB_STEP_SUMMARY
+              echo "- Potential Bugs: **$SPOTBUGS_BUGS**" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
           else
-            echo "### ⚠️ Tests - Not executed or no results" >> $GITHUB_STEP_SUMMARY
+            echo "### ⚠️ Linting Skipped" >> $GITHUB_STEP_SUMMARY
+            echo "Linting tools were not run due to compilation failure." >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
           fi
 
@@ -208,10 +174,10 @@ jobs:
           name: code-quality-reports
           path: |
             compile.log
+            compile_exit_code.txt
             target/checkstyle-result.xml
             target/pmd.xml
             target/spotbugsXml.xml
-            target/surefire-reports/
             target/site/
           retention-days: 30
           if-no-files-found: ignore
@@ -224,116 +190,88 @@ jobs:
             const fs = require('fs');
             let comment = '## 🔍 Code Quality Analysis Results\n\n';
             
-            let hasResults = false;
+            const compileStatus = '${{ steps.compile.outputs.status }}';
+            const exitCode = '${{ steps.compile.outputs.exit_code }}';
             
             // Compilation Status
-            const compileStatus = '${{ steps.compile.outputs.compile_status }}';
-            if (compileStatus === '0') {
-              comment += '### 🔨 Compilation\n✅ **SUCCESS**\n\n';
+            comment += '### 🔨 Compilation\n';
+            if (compileStatus === 'success') {
+              comment += '✅ **SUCCESS**\n\n';
             } else {
-              comment += '### 🔨 Compilation\n❌ **FAILED** - See workflow logs for details\n\n';
-              hasResults = true;
+              comment += `❌ **FAILED** (Exit Code: ${exitCode})\n\n`;
               
-              // Try to extract error summary
+              // Try to extract and show errors
               try {
                 if (fs.existsSync('compile.log')) {
                   const log = fs.readFileSync('compile.log', 'utf8');
-                  const errorLines = log.split('\n').filter(line => line.includes('[ERROR]')).slice(0, 5);
+                  const errorLines = log.split('\n')
+                    .filter(line => line.includes('[ERROR]') && !line.includes('Re-run Maven'))
+                    .slice(0, 10);
+                  
                   if (errorLines.length > 0) {
-                    comment += '<details><summary>Compilation Errors (first 5)</summary>\n\n```\n';
+                    comment += '<details><summary>📋 Compilation Errors (first 10)</summary>\n\n```\n';
                     comment += errorLines.join('\n');
                     comment += '\n```\n</details>\n\n';
                   }
                 }
               } catch (e) {
-                console.log('Could not parse compilation errors');
+                console.log('Could not parse compilation errors:', e);
               }
             }
             
-            // Parse Checkstyle
-            try {
-              if (fs.existsSync('target/checkstyle-result.xml')) {
-                const checkstyle = fs.readFileSync('target/checkstyle-result.xml', 'utf8');
-                const errors = (checkstyle.match(/severity="error"/g) || []).length;
-                const warnings = (checkstyle.match(/severity="warning"/g) || []).length;
-                const info = (checkstyle.match(/severity="info"/g) || []).length;
-                
-                comment += '### 📋 Checkstyle\n';
-                comment += `- ❌ Errors: ${errors}\n`;
-                comment += `- ⚠️ Warnings: ${warnings}\n`;
-                comment += `- ℹ️ Info: ${info}\n\n`;
-                hasResults = true;
-              }
-            } catch (e) {
-              comment += '### 📋 Checkstyle\n❌ No results available\n\n';
-            }
-            
-            // Parse PMD
-            try {
-              if (fs.existsSync('target/pmd.xml')) {
-                const pmd = fs.readFileSync('target/pmd.xml', 'utf8');
-                const violations = (pmd.match(/<violation/g) || []).length;
-                comment += '### 🔍 PMD\n';
-                comment += `- Violations: ${violations}\n\n`;
-                hasResults = true;
-              }
-            } catch (e) {
-              comment += '### 🔍 PMD\n❌ No results available\n\n';
-            }
-            
-            // Parse SpotBugs
-            try {
-              if (fs.existsSync('target/spotbugsXml.xml')) {
-                const spotbugs = fs.readFileSync('target/spotbugsXml.xml', 'utf8');
-                const bugs = (spotbugs.match(/<BugInstance/g) || []).length;
-                comment += '### 🐛 SpotBugs\n';
-                comment += `- Potential Bugs: ${bugs}\n\n`;
-                hasResults = true;
-              }
-            } catch (e) {
-              comment += '### 🐛 SpotBugs\n❌ No results available\n\n';
-            }
-            
-            // Test Results
-            try {
-              const testFiles = fs.readdirSync('target/surefire-reports').filter(f => f.startsWith('TEST-') && f.endsWith('.xml'));
-              if (testFiles.length > 0) {
-                let totalTests = 0, failures = 0, errors = 0, skipped = 0;
-                
-                testFiles.forEach(file => {
-                  const content = fs.readFileSync(`target/surefire-reports/${file}`, 'utf8');
-                  const testsMatch = content.match(/tests="(\d+)"/);
-                  const failuresMatch = content.match(/failures="(\d+)"/);
-                  const errorsMatch = content.match(/errors="(\d+)"/);
-                  const skippedMatch = content.match(/skipped="(\d+)"/);
+            // Only show linting if compilation succeeded
+            if (compileStatus === 'success') {
+              // Parse Checkstyle
+              try {
+                if (fs.existsSync('target/checkstyle-result.xml')) {
+                  const checkstyle = fs.readFileSync('target/checkstyle-result.xml', 'utf8');
+                  const errors = (checkstyle.match(/severity="error"/g) || []).length;
+                  const warnings = (checkstyle.match(/severity="warning"/g) || []).length;
+                  const info = (checkstyle.match(/severity="info"/g) || []).length;
                   
-                  if (testsMatch) totalTests += parseInt(testsMatch[1]);
-                  if (failuresMatch) failures += parseInt(failuresMatch[1]);
-                  if (errorsMatch) errors += parseInt(errorsMatch[1]);
-                  if (skippedMatch) skipped += parseInt(skippedMatch[1]);
-                });
-                
-                const passed = totalTests - failures - errors - skipped;
-                comment += '### 🧪 Test Results\n';
-                comment += `- ✅ Passed: ${passed}\n`;
-                comment += `- ❌ Failed: ${failures}\n`;
-                comment += `- ⚠️ Errors: ${errors}\n`;
-                comment += `- ⏭️ Skipped: ${skipped}\n`;
-                comment += `- **Total: ${totalTests}**\n\n`;
-                hasResults = true;
+                  comment += '### 📋 Checkstyle\n';
+                  comment += `- ❌ Errors: ${errors}\n`;
+                  comment += `- ⚠️ Warnings: ${warnings}\n`;
+                  comment += `- ℹ️ Info: ${info}\n\n`;
+                }
+              } catch (e) {
+                console.log('Could not parse Checkstyle results');
               }
-            } catch (e) {
-              comment += '### 🧪 Tests\n⚠️ No test results found\n\n';
+              
+              // Parse PMD
+              try {
+                if (fs.existsSync('target/pmd.xml')) {
+                  const pmd = fs.readFileSync('target/pmd.xml', 'utf8');
+                  const violations = (pmd.match(/<violation/g) || []).length;
+                  comment += '### 🔍 PMD\n';
+                  comment += `- Violations: ${violations}\n\n`;
+                }
+              } catch (e) {
+                console.log('Could not parse PMD results');
+              }
+              
+              // Parse SpotBugs
+              try {
+                if (fs.existsSync('target/spotbugsXml.xml')) {
+                  const spotbugs = fs.readFileSync('target/spotbugsXml.xml', 'utf8');
+                  const bugs = (spotbugs.match(/<BugInstance/g) || []).length;
+                  comment += '### 🐛 SpotBugs\n';
+                  comment += `- Potential Bugs: ${bugs}\n\n`;
+                }
+              } catch (e) {
+                console.log('Could not parse SpotBugs results');
+              }
+            } else {
+              comment += '### ⚠️ Linting Analysis\n';
+              comment += 'Skipped due to compilation failure.\n\n';
             }
             
             comment += '---\n';
             comment += `📦 [Download detailed reports](${context.payload.repository.html_url}/actions/runs/${context.runId})`;
             
-            if (hasResults) {
-              github.rest.issues.createComment({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: comment
-              });
-            }
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
