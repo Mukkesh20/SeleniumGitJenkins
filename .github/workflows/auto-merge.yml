@@ -91,7 +91,7 @@ jobs:
             
             // Determine change type from labels
             const isFrameworkChange = labels.includes('framework');
-            const isTestChange = labels.includes('test');
+            const isTestChange = labels.includes('tests');
             
             if (!isFrameworkChange && !isTestChange) {
               console.log('⏭️  No test/framework label found, skipping auto-merge check');
