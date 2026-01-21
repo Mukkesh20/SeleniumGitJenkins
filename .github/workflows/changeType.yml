@@ -31,6 +31,7 @@ jobs:
           fetch-depth: 0
 
       - name: Detect change types
+        if: always()
         id: changes
         run: |
           # Get list of changed files in the PR
@@ -58,7 +59,7 @@ jobs:
             fi
             
             # Test case changes: /tests directory
-            if [[ "$file" =~ ^module2/ ]] || [[ "$file" =~ /tests/ ]]; then
+            if [[ "$file" =~ ^module2/ ]] || [[ "$file" =~ /java/module2/ ]]; then
               TEST_CHANGES="true"
               echo "Test change detected: $file"
             fi
@@ -87,6 +88,7 @@ jobs:
           echo "Config changes: $CONFIG_CHANGES"
 
       - name: Add labels based on changes
+        if: always()
         uses: actions/github-script@v7
         with:
           script: |
@@ -152,6 +154,7 @@ jobs:
             }
 
       - name: Post change summary comment
+        if: always()
         uses: actions/github-script@v7
         with:
           script: |
