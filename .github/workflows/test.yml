@@ -38,13 +38,38 @@ jobs:
       - name: Compile project
         id: compile
         run: |
-          mvn clean compile -DskipTests 2>&1 | tee compile.log
-          echo "compile_status=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+          set +e
+          mvn clean compile -DskipTests > compile.log 2>&1
+          COMPILE_EXIT_CODE=$?
+          
+          # Also check if BUILD FAILURE appears in log
+          if grep -q "BUILD FAILURE" compile.log; then
+            COMPILE_EXIT_CODE=1
+          fi
+          
+          cat compile.log
+          echo "compile_status=$COMPILE_EXIT_CODE" >> $GITHUB_OUTPUT
+          
+          if [ $COMPILE_EXIT_CODE -ne 0 ]; then
+            echo "❌ Compilation failed with exit code: $COMPILE_EXIT_CODE"
+          else
+            echo "✅ Compilation successful"
+          fi
         continue-on-error: true
 
       - name: Run Checkstyle (Report Only)
         run: mvn checkstyle:checkstyle || true
         continue-on-error: true
+
+      - name: Debug - Check Compile Status
+        if: always()
+        run: |
+          echo "Compile status from previous step: ${{ steps.compile.outputs.compile_status }}"
+          if [ "${{ steps.compile.outputs.compile_status }}" != "0" ]; then
+            echo "⚠️ Compilation detected as FAILED"
+          else
+            echo "✅ Compilation detected as SUCCESS"
+          fi
 
       - name: Run PMD (Report Only)
         run: mvn pmd:pmd || true
