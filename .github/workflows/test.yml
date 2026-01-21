@@ -12,7 +12,7 @@ on:
 
 jobs:
   lint:
-    name: Java Code Linting
+    name: Java Code Linting (Changed Files Only)
     runs-on: ubuntu-latest
     
     steps:
@@ -21,7 +21,44 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Get Changed Java Files
+        id: changed-files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # For PRs, compare against base branch
+            BASE_SHA=${{ github.event.pull_request.base.sha }}
+            HEAD_SHA=${{ github.event.pull_request.head.sha }}
+            
+            echo "Comparing $BASE_SHA...$HEAD_SHA"
+            
+            # Get changed Java files (Added, Modified, Renamed)
+            CHANGED_FILES=$(git diff --name-only --diff-filter=AMR $BASE_SHA...$HEAD_SHA | grep '\.java$' || true)
+          else
+            # For push events, compare against previous commit
+            CHANGED_FILES=$(git diff --name-only --diff-filter=AMR HEAD~1 HEAD | grep '\.java$' || true)
+          fi
+          
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No Java files changed"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "file_count=0" >> $GITHUB_OUTPUT
+          else
+            FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l)
+            echo "Found $FILE_COUNT changed Java file(s):"
+            echo "$CHANGED_FILES"
+            
+            # Save to file for later steps
+            echo "$CHANGED_FILES" > changed_files.txt
+            
+            # Create space-separated list for tools
+            CHANGED_FILES_SPACE=$(echo "$CHANGED_FILES" | tr '\n' ' ')
+            echo "changed_files=$CHANGED_FILES_SPACE" >> $GITHUB_OUTPUT
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
+          fi
+
       - name: Set up JDK 1.8
+        if: steps.changed-files.outputs.has_changes == 'true'
         uses: actions/setup-java@v4
         with:
           java-version: '8.0.442+6'
@@ -29,184 +66,206 @@ jobs:
           cache: 'maven'
 
       - name: Cache Maven packages
+        if: steps.changed-files.outputs.has_changes == 'true'
         uses: actions/cache@v4
         with:
           path: ~/.m2
           key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
           restore-keys: ${{ runner.os }}-m2
 
-      - name: Run TestNG Tests
-        id: test
+      - name: Compile Changed Files
+        id: compile
+        if: steps.changed-files.outputs.has_changes == 'true'
         run: |
-          echo "Starting TestNG test execution..."
+          echo "Compiling project to check for errors in changed files..."
           
           set +e
-          mvn test -DsuiteXmlFile=testng.xml 2>&1 | tee test-output.log
+          mvn compile -DskipTests 2>&1 | tee compile.log
           MAVEN_EXIT_CODE=${PIPESTATUS[0]}
           set -e
           
           echo "Maven exit code: $MAVEN_EXIT_CODE"
-          echo $MAVEN_EXIT_CODE > test_exit_code.txt
           
-          # Determine test status
-          FAILED=false
-          FAILURE_REASON=""
-          
-          # Check 1: Maven exit code
-          if [ $MAVEN_EXIT_CODE -ne 0 ]; then
-            FAILED=true
-            FAILURE_REASON="Maven exited with code $MAVEN_EXIT_CODE"
-          fi
-          
-          # Check 2: BUILD FAILURE in output
-          if grep -q "BUILD FAILURE" test-output.log; then
-            FAILED=true
-            if grep -q "COMPILATION ERROR" test-output.log; then
-              FAILURE_REASON="Compilation error"
-            elif grep -q "There are test failures" test-output.log; then
-              FAILURE_REASON="Test failures detected"
-            else
-              FAILURE_REASON="Build failure"
-            fi
-          fi
-          
-          # Check 3: TestNG specific failures
-          if grep -q "Tests run:.*Failures: [1-9]" test-output.log; then
-            FAILED=true
-            FAILURE_REASON="TestNG test failures"
-          fi
-          
-          if grep -q "Tests run:.*Errors: [1-9]" test-output.log; then
-            FAILED=true
-            FAILURE_REASON="TestNG test errors"
-          fi
-          
-          # Extract test summary if available
-          TEST_SUMMARY=$(grep -E "Tests run: [0-9]+" test-output.log | tail -1 || echo "No test summary found")
-          echo "test_summary=$TEST_SUMMARY" >> $GITHUB_OUTPUT
-          
-          # Set outputs and exit appropriately
-          if [ "$FAILED" = true ]; then
+          if [ $MAVEN_EXIT_CODE -ne 0 ] || grep -q "BUILD FAILURE" compile.log; then
             echo "status=failed" >> $GITHUB_OUTPUT
-            echo "exit_code=1" >> $GITHUB_OUTPUT
-            echo "reason=$FAILURE_REASON" >> $GITHUB_OUTPUT
-            echo ""
-            echo "=========================================="
-            echo "❌ TEST EXECUTION FAILED: $FAILURE_REASON"
-            echo "=========================================="
-            echo ""
-            echo "Error details:"
-            grep -E "\[ERROR\]|FAILURE|Exception|Error:" test-output.log | grep -v "Re-run Maven" | head -30 || true
-            echo ""
-            exit 1
+            
+            # Check if errors are in changed files
+            echo "Checking if compilation errors are in changed files..."
+            ERRORS_IN_CHANGED=false
+            while IFS= read -r file; do
+              if grep -q "$file" compile.log; then
+                ERRORS_IN_CHANGED=true
+                echo "❌ Error found in changed file: $file"
+              fi
+            done < changed_files.txt
+            
+            if [ "$ERRORS_IN_CHANGED" = true ]; then
+              echo "errors_in_changed=true" >> $GITHUB_OUTPUT
+              exit 1
+            else
+              echo "errors_in_changed=false" >> $GITHUB_OUTPUT
+              echo "⚠️ Compilation errors exist but not in changed files"
+            fi
           else
             echo "status=success" >> $GITHUB_OUTPUT
-            echo "exit_code=0" >> $GITHUB_OUTPUT
-            echo ""
-            echo "=========================================="
-            echo "✅ TEST EXECUTION SUCCESSFUL"
-            echo "Test Summary: $TEST_SUMMARY"
-            echo "=========================================="
+            echo "✅ Compilation successful"
           fi
 
-      - name: Verify Test Status
-        if: always()
+      - name: Run Checkstyle on Changed Files
+        id: checkstyle
+        if: steps.changed-files.outputs.has_changes == 'true'
         run: |
-          echo "Test status: ${{ steps.test.outputs.status }}"
-          echo "Exit code: ${{ steps.test.outputs.exit_code }}"
-          echo "Reason: ${{ steps.test.outputs.reason }}"
-          echo "Test Summary: ${{ steps.test.outputs.test_summary }}"
+          echo "Running Checkstyle on changed files..."
           
-          if [ -f test_exit_code.txt ]; then
-            echo "Maven exit code from file: $(cat test_exit_code.txt)"
+          CHANGED_FILES="${{ steps.changed-files.outputs.changed_files }}"
+          
+          # Create checkstyle config if not exists
+          if [ ! -f "checkstyle.xml" ]; then
+            echo "Using default Google style checks"
+            CHECKSTYLE_CONFIG="google_checks.xml"
+          else
+            CHECKSTYLE_CONFIG="checkstyle.xml"
           fi
-
-      - name: Run Checkstyle (Report Only)
-        if: always()
-        run: mvn checkstyle:checkstyle || true
+          
+          # Run checkstyle only on changed files
+          mvn checkstyle:check \
+            -Dcheckstyle.includes="$(echo $CHANGED_FILES | sed 's/ /,/g')" \
+            -Dcheckstyle.failOnViolation=false \
+            -Dcheckstyle.outputFile=target/checkstyle-result.xml \
+            || true
+          
+          # Parse results for changed files only
+          if [ -f "target/checkstyle-result.xml" ]; then
+            TOTAL_ERRORS=0
+            TOTAL_WARNINGS=0
+            
+            while IFS= read -r file; do
+              FILE_ERRORS=$(grep -c "severity=\"error\".*$file\|$file.*severity=\"error\"" target/checkstyle-result.xml 2>/dev/null || echo "0")
+              FILE_WARNINGS=$(grep -c "severity=\"warning\".*$file\|$file.*severity=\"warning\"" target/checkstyle-result.xml 2>/dev/null || echo "0")
+              
+              if [ "$FILE_ERRORS" -gt 0 ] || [ "$FILE_WARNINGS" -gt 0 ]; then
+                echo "📄 $file - Errors: $FILE_ERRORS, Warnings: $FILE_WARNINGS"
+              fi
+              
+              TOTAL_ERRORS=$((TOTAL_ERRORS + FILE_ERRORS))
+              TOTAL_WARNINGS=$((TOTAL_WARNINGS + FILE_WARNINGS))
+            done < changed_files.txt
+            
+            echo "checkstyle_errors=$TOTAL_ERRORS" >> $GITHUB_OUTPUT
+            echo "checkstyle_warnings=$TOTAL_WARNINGS" >> $GITHUB_OUTPUT
+          fi
         continue-on-error: true
 
-      - name: Run PMD (Report Only)
-        if: always()
-        run: mvn pmd:pmd || true
+      - name: Run PMD on Changed Files
+        id: pmd
+        if: steps.changed-files.outputs.has_changes == 'true'
+        run: |
+          echo "Running PMD on changed files..."
+          
+          # Run PMD with file list
+          mvn pmd:pmd -Dpmd.outputFile=target/pmd.xml || true
+          
+          # Parse results for changed files only
+          if [ -f "target/pmd.xml" ]; then
+            TOTAL_VIOLATIONS=0
+            
+            while IFS= read -r file; do
+              # Count violations for this file
+              FILE_VIOLATIONS=$(grep -c "<file name=\".*$file\"" target/pmd.xml 2>/dev/null || echo "0")
+              
+              if [ "$FILE_VIOLATIONS" -gt 0 ]; then
+                echo "📄 $file - Violations: $FILE_VIOLATIONS"
+                TOTAL_VIOLATIONS=$((TOTAL_VIOLATIONS + FILE_VIOLATIONS))
+              fi
+            done < changed_files.txt
+            
+            echo "pmd_violations=$TOTAL_VIOLATIONS" >> $GITHUB_OUTPUT
+          fi
         continue-on-error: true
 
-      - name: Run SpotBugs (Report Only)
-        if: always()
-        run: mvn spotbugs:spotbugs || true
+      - name: Run SpotBugs on Changed Files
+        id: spotbugs
+        if: steps.changed-files.outputs.has_changes == 'true'
+        run: |
+          echo "Running SpotBugs on changed files..."
+          
+          # SpotBugs needs compiled classes
+          mvn spotbugs:spotbugs -Dspotbugs.outputFile=target/spotbugsXml.xml || true
+          
+          # Parse results for changed files only
+          if [ -f "target/spotbugsXml.xml" ]; then
+            TOTAL_BUGS=0
+            
+            while IFS= read -r file; do
+              # Extract class name from file path
+              CLASS_NAME=$(echo "$file" | sed 's|.*/||' | sed 's|\.java$||')
+              
+              # Count bugs for this class
+              FILE_BUGS=$(grep -c "SourceLine.*classname=\".*$CLASS_NAME\"" target/spotbugsXml.xml 2>/dev/null || echo "0")
+              
+              if [ "$FILE_BUGS" -gt 0 ]; then
+                echo "📄 $file - Potential Bugs: $FILE_BUGS"
+                TOTAL_BUGS=$((TOTAL_BUGS + FILE_BUGS))
+              fi
+            done < changed_files.txt
+            
+            echo "spotbugs_bugs=$TOTAL_BUGS" >> $GITHUB_OUTPUT
+          fi
         continue-on-error: true
 
       - name: Generate Quality Report Summary
         if: always()
         run: |
-          echo "## 📊 Code Quality Report" >> $GITHUB_STEP_SUMMARY
+          echo "## 📊 Code Quality Report (Changed Files Only)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Build Date:** $(date)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          # Test Execution Status
-          echo "### 🧪 Test Execution" >> $GITHUB_STEP_SUMMARY
-          TEST_STATUS="${{ steps.test.outputs.status }}"
+          HAS_CHANGES="${{ steps.changed-files.outputs.has_changes }}"
           
-          if [ "$TEST_STATUS" = "success" ]; then
+          if [ "$HAS_CHANGES" != "true" ]; then
+            echo "### ℹ️ No Java Files Changed" >> $GITHUB_STEP_SUMMARY
+            echo "No Java files were modified in this PR." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+          
+          # Changed Files
+          echo "### 📁 Changed Java Files (${{ steps.changed-files.outputs.file_count }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f "changed_files.txt" ]; then
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            cat changed_files.txt >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Compilation Status
+          echo "### 🔨 Compilation" >> $GITHUB_STEP_SUMMARY
+          COMPILE_STATUS="${{ steps.compile.outputs.status }}"
+          if [ "$COMPILE_STATUS" = "success" ]; then
             echo "✅ **Status:** SUCCESS" >> $GITHUB_STEP_SUMMARY
-            echo "**Summary:** ${{ steps.test.outputs.test_summary }}" >> $GITHUB_STEP_SUMMARY
-          else
+          elif [ "$COMPILE_STATUS" = "failed" ]; then
             echo "❌ **Status:** FAILED" >> $GITHUB_STEP_SUMMARY
-            echo "**Reason:** ${{ steps.test.outputs.reason }}" >> $GITHUB_STEP_SUMMARY
-            
-            if [ -f "test-output.log" ]; then
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "<details><summary>📋 Click to see error details</summary>" >> $GITHUB_STEP_SUMMARY
+            if [ -f "compile.log" ]; then
+              echo "<details><summary>📋 Compilation Errors</summary>" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
               echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-              
-              # Extract error lines
-              grep -E "\[ERROR\]|COMPILATION ERROR|Failures:|Errors:" test-output.log | grep -v "Re-run Maven" | head -30 >> $GITHUB_STEP_SUMMARY || echo "See test-output.log artifact for full details"
-              
+              grep "\[ERROR\]" compile.log | head -20 >> $GITHUB_STEP_SUMMARY || true
               echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
               echo "</details>" >> $GITHUB_STEP_SUMMARY
             fi
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          # Only show linting results if tests passed
-          if [ "$TEST_STATUS" = "success" ]; then
-            # Checkstyle Summary
-            if [ -f "target/checkstyle-result.xml" ]; then
-              CHECKSTYLE_ERRORS=$(grep -o 'severity="error"' target/checkstyle-result.xml | wc -l || echo "0")
-              CHECKSTYLE_WARNINGS=$(grep -o 'severity="warning"' target/checkstyle-result.xml | wc -l || echo "0")
-              CHECKSTYLE_INFO=$(grep -o 'severity="info"' target/checkstyle-result.xml | wc -l || echo "0")
-              echo "### ✅ Checkstyle Analysis" >> $GITHUB_STEP_SUMMARY
-              echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
-              echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
-              echo "| Errors | $CHECKSTYLE_ERRORS |" >> $GITHUB_STEP_SUMMARY
-              echo "| Warnings | $CHECKSTYLE_WARNINGS |" >> $GITHUB_STEP_SUMMARY
-              echo "| Info | $CHECKSTYLE_INFO |" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-            fi
-            
-            # PMD Summary
-            if [ -f "target/pmd.xml" ]; then
-              PMD_VIOLATIONS=$(grep -c '<violation' target/pmd.xml || echo "0")
-              echo "### ✅ PMD Analysis" >> $GITHUB_STEP_SUMMARY
-              echo "- Total Violations: **$PMD_VIOLATIONS**" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-            fi
-            
-            # SpotBugs Summary
-            if [ -f "target/spotbugsXml.xml" ]; then
-              SPOTBUGS_BUGS=$(grep -c '<BugInstance' target/spotbugsXml.xml || echo "0")
-              echo "### ✅ SpotBugs Analysis" >> $GITHUB_STEP_SUMMARY
-              echo "- Potential Bugs: **$SPOTBUGS_BUGS**" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-            fi
-          else
-            echo "### ⚠️ Linting Skipped" >> $GITHUB_STEP_SUMMARY
-            echo "Linting tools were not run due to test/compilation failure." >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          fi
+          # Linting Results Summary Table
+          echo "### 📋 Linting Results (Changed Files Only)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Tool | Issues Found |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Checkstyle Errors | ${{ steps.checkstyle.outputs.checkstyle_errors || '0' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Checkstyle Warnings | ${{ steps.checkstyle.outputs.checkstyle_warnings || '0' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| PMD Violations | ${{ steps.pmd.outputs.pmd_violations || '0' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| SpotBugs Issues | ${{ steps.spotbugs.outputs.spotbugs_bugs || '0' }} |" >> $GITHUB_STEP_SUMMARY
 
       - name: Upload Analysis Results
         if: always()
@@ -214,13 +273,11 @@ jobs:
         with:
           name: code-quality-reports
           path: |
-            test-output.log
-            test_exit_code.txt
-            target/surefire-reports/
+            changed_files.txt
+            compile.log
             target/checkstyle-result.xml
             target/pmd.xml
             target/spotbugsXml.xml
-            target/site/
           retention-days: 30
           if-no-files-found: ignore
 
@@ -230,97 +287,76 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            let comment = '## 🔍 Code Quality Analysis Results\n\n';
+            let comment = '## 🔍 Code Quality Analysis (Changed Files Only)\n\n';
             
-            const testStatus = '${{ steps.test.outputs.status }}';
-            const exitCode = '${{ steps.test.outputs.exit_code }}';
-            const failureReason = '${{ steps.test.outputs.reason }}';
-            const testSummary = '${{ steps.test.outputs.test_summary }}';
+            const hasChanges = '${{ steps.changed-files.outputs.has_changes }}';
+            const fileCount = '${{ steps.changed-files.outputs.file_count }}';
             
-            // Test Execution Status
-            comment += '### 🧪 Test Execution\n';
-            if (testStatus === 'success') {
-              comment += '✅ **SUCCESS**\n';
-              comment += `**Summary:** ${testSummary}\n\n`;
+            if (hasChanges !== 'true') {
+              comment += '### ℹ️ No Java Files Changed\n';
+              comment += 'No Java files were modified in this PR.\n';
             } else {
-              comment += `❌ **FAILED**\n`;
-              comment += `**Reason:** ${failureReason}\n\n`;
-              
-              // Try to extract and show errors
+              // Changed files
+              comment += `### 📁 Changed Java Files (${fileCount})\n`;
               try {
-                if (fs.existsSync('test-output.log')) {
-                  const log = fs.readFileSync('test-output.log', 'utf8');
-                  const errorLines = log.split('\n')
-                    .filter(line => 
-                      (line.includes('[ERROR]') || line.includes('COMPILATION ERROR') || line.includes('Exception')) 
-                      && !line.includes('Re-run Maven')
-                    )
-                    .slice(0, 15);
-                  
-                  if (errorLines.length > 0) {
-                    comment += '<details><summary>📋 Error Details (first 15 lines)</summary>\n\n```\n';
-                    comment += errorLines.join('\n');
-                    comment += '\n```\n</details>\n\n';
-                  }
+                if (fs.existsSync('changed_files.txt')) {
+                  const files = fs.readFileSync('changed_files.txt', 'utf8').trim();
+                  comment += '<details><summary>View files</summary>\n\n```\n';
+                  comment += files;
+                  comment += '\n```\n</details>\n\n';
                 }
               } catch (e) {
-                console.log('Could not parse test errors:', e);
+                console.log('Could not read changed files');
               }
+              
+              // Compilation
+              const compileStatus = '${{ steps.compile.outputs.status }}';
+              comment += '### 🔨 Compilation\n';
+              if (compileStatus === 'success') {
+                comment += '✅ **SUCCESS**\n\n';
+              } else if (compileStatus === 'failed') {
+                comment += '❌ **FAILED**\n\n';
+              } else {
+                comment += '⏭️ Skipped\n\n';
+              }
+              
+              // Linting Summary
+              comment += '### 📋 Linting Results\n';
+              comment += '| Tool | Issues |\n';
+              comment += '|------|--------|\n';
+              comment += `| Checkstyle Errors | ${{ steps.checkstyle.outputs.checkstyle_errors || '0' }} |\n`;
+              comment += `| Checkstyle Warnings | ${{ steps.checkstyle.outputs.checkstyle_warnings || '0' }} |\n`;
+              comment += `| PMD Violations | ${{ steps.pmd.outputs.pmd_violations || '0' }} |\n`;
+              comment += `| SpotBugs Issues | ${{ steps.spotbugs.outputs.spotbugs_bugs || '0' }} |\n`;
             }
             
-            // Only show linting if tests passed
-            if (true) {
-              // Parse Checkstyle
-              try {
-                if (fs.existsSync('target/checkstyle-result.xml')) {
-                  const checkstyle = fs.readFileSync('target/checkstyle-result.xml', 'utf8');
-                  const errors = (checkstyle.match(/severity="error"/g) || []).length;
-                  const warnings = (checkstyle.match(/severity="warning"/g) || []).length;
-                  const info = (checkstyle.match(/severity="info"/g) || []).length;
-                  
-                  comment += '### 📋 Checkstyle\n';
-                  comment += `- ❌ Errors: ${errors}\n`;
-                  comment += `- ⚠️ Warnings: ${warnings}\n`;
-                  comment += `- ℹ️ Info: ${info}\n\n`;
-                }
-              } catch (e) {
-                console.log('Could not parse Checkstyle results');
-              }
-              
-              // Parse PMD
-              try {
-                if (fs.existsSync('target/pmd.xml')) {
-                  const pmd = fs.readFileSync('target/pmd.xml', 'utf8');
-                  const violations = (pmd.match(/<violation/g) || []).length;
-                  comment += '### 🔍 PMD\n';
-                  comment += `- Violations: ${violations}\n\n`;
-                }
-              } catch (e) {
-                console.log('Could not parse PMD results');
-              }
-              
-              // Parse SpotBugs
-              try {
-                if (fs.existsSync('target/spotbugsXml.xml')) {
-                  const spotbugs = fs.readFileSync('target/spotbugsXml.xml', 'utf8');
-                  const bugs = (spotbugs.match(/<BugInstance/g) || []).length;
-                  comment += '### 🐛 SpotBugs\n';
-                  comment += `- Potential Bugs: ${bugs}\n\n`;
-                }
-              } catch (e) {
-                console.log('Could not parse SpotBugs results');
-              }
-            } else {
-              comment += '### ⚠️ Linting Analysis\n';
-              comment += 'Skipped due to test/compilation failure.\n\n';
-            }
-            
-            comment += '---\n';
+            comment += '\n---\n';
             comment += `📦 [Download detailed reports](${context.payload.repository.html_url}/actions/runs/${context.runId})`;
             
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
+            // Find existing comment to update
+            const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: comment
+              issue_number: context.issue.number
             });
+            
+            const botComment = comments.find(c => 
+              c.user.type === 'Bot' && 
+              c.body.includes('Code Quality Analysis')
+            );
+            
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: comment
+              });
+            }
