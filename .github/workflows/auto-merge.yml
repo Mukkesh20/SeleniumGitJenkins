@@ -1,242 +1,191 @@
-name: PR Change Detector
+name: PR Approval Check
 
 on:
+  pull_request_review:
+    types: [submitted, dismissed]
   pull_request:
-    types: [opened, synchronize, reopened]
-    branches:
-      - main
-      - develop
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 permissions:
   contents: read
-  pull-requests: write
-  issues: write
+  pull-requests: write  # Changed from 'read' to 'write'
+  issues: write         # Added
 
 jobs:
-  detect-changes:
+  validate-approvals:
+    name: validate-approvals
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Detect change types
-        id: changes
-        run: |
-          # Get list of changed files in the PR
-          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
-          
-          echo "Changed files:"
-          echo "$CHANGED_FILES"
-          echo ""
-          
-          # Initialize flags
-          FRAMEWORK_CHANGES="false"
-          TEST_CHANGES="false"
-          CONFIG_CHANGES="false"
-          
-          # Check each file against patterns
-          while IFS= read -r file; do
-            # Skip empty lines
-            [[ -z "$file" ]] && continue
-            
-            echo "Checking: $file"
-            
-            # Framework changes: /utils, /dal, /core, /lib, /common directories
-            if [[ "$file" =~ ^(utils|dal|core|lib|common)/ ]] || \
-               [[ "$file" =~ /(utils|dal|core|lib|common)/ ]]; then
-              FRAMEWORK_CHANGES="true"
-              echo "  → Framework change detected"
-            fi
-            
-            # Test case changes: /module2 directory
-            if [[ "$file" =~ ^module2/ ]] || [[ "$file" =~ /module2/ ]]; then
-              TEST_CHANGES="true"
-              echo "  → Test change detected"
-            fi
-            
-            # Config changes: *.conf, *.config, *.properties, *.yml, *.yaml in config dirs
-            if [[ "$file" =~ \.(conf|config|properties|yml|yaml)$ ]] || \
-               [[ "$file" =~ ^config/ ]] || \
-               [[ "$file" =~ /config/ ]]; then
-              CONFIG_CHANGES="true"
-              echo "  → Config change detected"
-            fi
-          done <<< "$CHANGED_FILES"
-          
-          # Set outputs
-          echo "framework=$FRAMEWORK_CHANGES" >> $GITHUB_OUTPUT
-          echo "tests=$TEST_CHANGES" >> $GITHUB_OUTPUT
-          echo "config=$CONFIG_CHANGES" >> $GITHUB_OUTPUT
-          
-          # Summary
-          echo ""
-          echo "=== Change Summary ==="
-          echo "Framework changes: $FRAMEWORK_CHANGES"
-          echo "Test changes: $TEST_CHANGES"
-          echo "Config changes: $CONFIG_CHANGES"
-
-      - name: Add labels based on changes
+      - name: Get PR info
+        id: pr-info
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const framework = '${{ steps.changes.outputs.framework }}' === 'true';
-            const tests = '${{ steps.changes.outputs.tests }}' === 'true';
-            const config = '${{ steps.changes.outputs.config }}' === 'true';
-            
-            console.log('='.repeat(60));
-            console.log('Label Assignment');
-            console.log('='.repeat(60));
-            console.log(`Framework: ${framework}`);
-            console.log(`Tests: ${tests}`);
-            console.log(`Config: ${config}`);
-            console.log(`PR Number: ${context.payload.pull_request.number}`);
-            
-            const labelsToAdd = [];
-            const labelsToRemove = [];
-            
-            // Use simple label names
-            const allPossibleLabels = ['framework', 'tests', 'config'];
-            
-            // Determine which labels to add
-            if (framework) labelsToAdd.push('framework');
-            if (tests) labelsToAdd.push('tests');
-            if (config) labelsToAdd.push('config');
-            
-            // Labels to remove are those not being added
-            for (const label of allPossibleLabels) {
-              if (!labelsToAdd.includes(label)) {
-                labelsToRemove.push(label);
-              }
-            }
-            
-            console.log(`Labels to add: ${labelsToAdd.join(', ') || 'none'}`);
-            console.log(`Labels to remove: ${labelsToRemove.join(', ') || 'none'}`);
-            
-            // Get current labels on the PR
             try {
-              const { data: currentLabels } = await github.rest.issues.listLabelsOnIssue({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.payload.pull_request.number
-              });
-              const currentLabelNames = currentLabels.map(l => l.name);
-              
-              console.log(`Current labels: ${currentLabelNames.join(', ') || 'none'}`);
-              
-              // Add new labels
-              const labelsToActuallyAdd = labelsToAdd.filter(l => !currentLabelNames.includes(l));
-              if (labelsToActuallyAdd.length > 0) {
-                await github.rest.issues.addLabels({
+              // Handle both pull_request and pull_request_review events
+              let pr;
+              if (context.payload.pull_request) {
+                pr = context.payload.pull_request;
+              } else if (context.payload.review) {
+                // For pull_request_review events
+                const { data: prData } = await github.rest.pulls.get({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  issue_number: context.payload.pull_request.number,
-                  labels: labelsToActuallyAdd
+                  pull_number: context.payload.review.pull_request.number
                 });
-                console.log(`✅ Added labels: ${labelsToActuallyAdd.join(', ')}`);
+                pr = prData;
               } else {
-                console.log('ℹ️  All required labels already present');
+                console.log('No PR found in context');
+                core.setOutput('number', '');
+                core.setOutput('labels', '');
+                return;
               }
               
-              // Remove labels that no longer apply
-              for (const label of labelsToRemove) {
-                if (currentLabelNames.includes(label)) {
-                  try {
-                    await github.rest.issues.removeLabel({
-                      owner: context.repo.owner,
-                      repo: context.repo.repo,
-                      issue_number: context.payload.pull_request.number,
-                      name: label
-                    });
-                    console.log(`✅ Removed label: ${label}`);
-                  } catch (e) {
-                    console.log(`⚠️  Could not remove label ${label}: ${e.message}`);
-                  }
+              const labels = pr.labels.map(l => l.name);
+              
+              core.setOutput('number', pr.number);
+              core.setOutput('labels', labels.join(','));
+              
+              console.log(`PR #${pr.number}`);
+              console.log(`Labels: ${labels.join(', ') || 'none'}`);
+            } catch (error) {
+              console.error('Error getting PR info:', error);
+              core.setFailed(`Failed to get PR info: ${error.message}`);
+            }
+      
+      - name: Validate approval requirements
+        if: steps.pr-info.outputs.number != ''
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = parseInt('${{ steps.pr-info.outputs.number }}');
+            const labels = '${{ steps.pr-info.outputs.labels }}'.split(',').filter(Boolean);
+            
+            // QTF Core Team - REPLACE WITH ACTUAL GITHUB USERNAMES
+            const QTF_CORE_TEAM = [
+              'username1',
+              'username2', 
+              'username3'
+            ];
+            
+            console.log('='.repeat(60));
+            console.log(`PR #${prNumber} - Approval Validation`);
+            console.log(`Event: ${context.eventName}`);
+            console.log('='.repeat(60));
+            
+            // Check for framework or tests labels
+            const isFramework = labels.includes('framework');
+            const isTest = labels.includes('tests');
+            
+            console.log(`\nChange Type:`);
+            console.log(`  Framework: ${isFramework}`);
+            console.log(`  Test: ${isTest}`);
+            console.log(`  Labels: ${labels.join(', ') || 'none'}`);
+            
+            // If no relevant label, pass the check
+            if (!isFramework && !isTest) {
+              console.log(`\n✅ No framework/test label - standard review process applies`);
+              return;
+            }
+            
+            try {
+              // Get all reviews
+              const { data: reviews } = await github.rest.pulls.listReviews({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber
+              });
+              
+              // Get latest review state per reviewer
+              const latestReviews = {};
+              for (const review of reviews) {
+                const user = review.user.login;
+                if (!latestReviews[user] || 
+                    new Date(review.submitted_at) > new Date(latestReviews[user].submitted_at)) {
+                  latestReviews[user] = review;
                 }
               }
               
-              console.log('='.repeat(60));
-              console.log('Label assignment complete');
-              console.log('='.repeat(60));
+              // Count approvals
+              const allApprovals = Object.values(latestReviews).filter(r => r.state === 'APPROVED');
+              const approvedBy = allApprovals.map(r => r.user.login);
+              const totalApprovals = allApprovals.length;
+              const coreApprovals = allApprovals.filter(r => QTF_CORE_TEAM.includes(r.user.login));
+              const coreApprovedBy = coreApprovals.map(r => r.user.login);
               
-            } catch (error) {
-              console.error('❌ Error managing labels:', error);
-              core.setFailed(`Failed to manage labels: ${error.message}`);
-            }
-
-      - name: Post change summary comment
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const framework = '${{ steps.changes.outputs.framework }}' === 'true';
-            const tests = '${{ steps.changes.outputs.tests }}' === 'true';
-            const config = '${{ steps.changes.outputs.config }}' === 'true';
-            
-            let body = '## 📋 PR Change Detection Summary\n\n';
-            body += '| Category | Detected | Review Focus |\n';
-            body += '|----------|----------|-------------|\n';
-            body += `| 🔧 Framework (\`/utils\`, \`/dal\`, \`/core\`, \`/lib\`, \`/common\`) | ${framework ? '✅ Yes' : '❌ No'} | ${framework ? '**High** - Core framework impact' : 'N/A'} |\n`;
-            body += `| 🧪 Test Cases (\`/module2\`) | ${tests ? '✅ Yes' : '❌ No'} | ${tests ? 'Standard - Test coverage' : 'N/A'} |\n`;
-            body += `| ⚙️ Config Files | ${config ? '✅ Yes' : '❌ No'} | ${config ? '**Medium** - Environment impact' : 'N/A'} |\n`;
-            
-            // Add approval requirements info
-            body += '\n### 📝 Approval Requirements\n';
-            if (framework) {
-              body += '- **Framework changes** detected: Requires **2 approvals** (at least 1 from QTF core team)\n';
-              body += '- Auto-merge will be enabled once requirements are met\n';
-            } else if (tests) {
-              body += '- **Test-only changes** detected: Requires **2 approvals** (any reviewers)\n';
-              body += '- Auto-merge will be enabled once requirements are met\n';
-            } else {
-              body += '- **Standard changes**: Requires **1 approval** (any reviewer)\n';
-            }
-            
-            // Add review guidance
-            if (framework) {
-              body += '\n### ⚠️ Framework Changes Detected\n';
-              body += 'This PR modifies core framework components. Please ensure:\n';
-              body += '- ✓ Backward compatibility is maintained\n';
-              body += '- ✓ Existing tests pass\n';
-              body += '- ✓ Documentation is updated if APIs changed\n';
-              
-              if (!tests) {
-                body += '\n### 📝 Note: No test changes detected\n';
-                body += 'Consider adding tests for the framework changes.\n';
+              console.log(`\nCurrent Approvals:`);
+              console.log(`  Total: ${totalApprovals}`);
+              console.log(`  Approved by: ${approvedBy.join(', ') || 'none'}`);
+              console.log(`  Core team approvals: ${coreApprovals.length}`);
+              if (coreApprovals.length > 0) {
+                console.log(`  Core team approved by: ${coreApprovedBy.join(', ')}`);
               }
-            }
-            
-            try {
-              // Find and update existing comment or create new one
-              const { data: comments } = await github.rest.issues.listComments({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.payload.pull_request.number
-              });
               
-              const botComment = comments.find(c => 
-                c.user.type === 'Bot' && 
-                c.body.includes('PR Change Detection Summary')
-              );
+              // Apply approval rules
+              let passed = false;
+              let message = '';
               
-              if (botComment) {
-                await github.rest.issues.updateComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: botComment.id,
-                  body: body
-                });
-                console.log('✅ Updated existing comment');
+              if (isTest) {
+                // TEST CHANGES: Require 2 approvals
+                console.log(`\nRule: Test changes require 2 approvals`);
+                
+                if (totalApprovals >= 2) {
+                  passed = true;
+                  message = `✅ **Test change approved**\n\n${totalApprovals} approvals received. Requirements met.`;
+                } else {
+                  passed = false;
+                  message = `❌ **Test change requires 2 approvals**\n\nCurrent: ${totalApprovals}\nNeeded: ${2 - totalApprovals} more`;
+                }
+                
+              } else if (isFramework) {
+                // FRAMEWORK CHANGES: Require 2 approvals with 1 from core
+                console.log(`\nRule: Framework changes require 2 approvals (1 from core)`);
+                console.log(`Core team: ${QTF_CORE_TEAM.join(', ')}`);
+                
+                if (totalApprovals >= 2 && coreApprovals.length >= 1) {
+                  passed = true;
+                  message = `✅ **Framework change approved**\n\n${totalApprovals} approvals (${coreApprovals.length} from core). Requirements met.`;
+                } else if (totalApprovals < 2) {
+                  passed = false;
+                  message = `❌ **Framework change requires 2 approvals**\n\nCurrent: ${totalApprovals}\nNeeded: ${2 - totalApprovals} more ${coreApprovals.length === 0 ? '(at least 1 from core)' : ''}`;
+                } else if (coreApprovals.length < 1) {
+                  passed = false;
+                  message = `❌ **Framework change requires core team approval**\n\n` +
+                           `Approvers: ${approvedBy.join(', ')}\n` +
+                           `Core team: ${QTF_CORE_TEAM.join(', ')}\n\n` +
+                           `Need 1 approval from core team.`;
+                }
+              }
+              
+              console.log(`\n${'='.repeat(60)}`);
+              console.log(message.replace(/\n/g, ' - '));
+              console.log('='.repeat(60));
+              
+              // Post comment only on review events
+              if (context.eventName === 'pull_request_review') {
+                try {
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: prNumber,
+                    body: `🤖 **Approval Validation**\n\n${message}`
+                  });
+                } catch (commentError) {
+                  console.log(`Could not post comment: ${commentError.message}`);
+                }
+              }
+              
+              // Fail if requirements not met
+              if (!passed) {
+                core.setFailed(message.replace(/\*\*/g, '').replace(/\n/g, ' '));
               } else {
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: context.payload.pull_request.number,
-                  body: body
-                });
-                console.log('✅ Created new comment');
+                console.log('✅ All requirements met!');
               }
+              
             } catch (error) {
-              console.error('❌ Error posting comment:', error);
+              console.error('Error validating approvals:', error);
+              core.setFailed(`Failed to validate approvals: ${error.message}`);
             }
