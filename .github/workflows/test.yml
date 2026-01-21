@@ -122,17 +122,17 @@ jobs:
           fi
 
       - name: Run Checkstyle (Report Only)
-        if: steps.test.outputs.status == 'success'
+        if: always()
         run: mvn checkstyle:checkstyle || true
         continue-on-error: true
 
       - name: Run PMD (Report Only)
-        if: steps.test.outputs.status == 'success'
+        if: always()
         run: mvn pmd:pmd || true
         continue-on-error: true
 
       - name: Run SpotBugs (Report Only)
-        if: steps.test.outputs.status == 'success'
+        if: always()
         run: mvn spotbugs:spotbugs || true
         continue-on-error: true
 
