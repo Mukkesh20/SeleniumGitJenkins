@@ -35,21 +35,20 @@ jobs:
           key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
           restore-keys: ${{ runner.os }}-m2
 
-      - name: Compile project
-        id: compile
+      - name: Run TestNG Tests
+        id: test
         run: |
-          echo "Starting compilation..."
+          echo "Starting TestNG test execution..."
           
-          # Run Maven and capture both output and exit code
           set +e
-          mvn clean compile -DskipTests 2>&1 | tee compile.log
+          mvn test -DsuiteXmlFile=testng.xml 2>&1 | tee test-output.log
           MAVEN_EXIT_CODE=${PIPESTATUS[0]}
           set -e
           
           echo "Maven exit code: $MAVEN_EXIT_CODE"
-          echo $MAVEN_EXIT_CODE > compile_exit_code.txt
+          echo $MAVEN_EXIT_CODE > test_exit_code.txt
           
-          # Determine compilation status
+          # Determine test status
           FAILED=false
           FAILURE_REASON=""
           
@@ -60,26 +59,31 @@ jobs:
           fi
           
           # Check 2: BUILD FAILURE in output
-          if grep -q "BUILD FAILURE" compile.log; then
+          if grep -q "BUILD FAILURE" test-output.log; then
             FAILED=true
-            FAILURE_REASON="BUILD FAILURE detected in output"
+            if grep -q "COMPILATION ERROR" test-output.log; then
+              FAILURE_REASON="Compilation error"
+            elif grep -q "There are test failures" test-output.log; then
+              FAILURE_REASON="Test failures detected"
+            else
+              FAILURE_REASON="Build failure"
+            fi
           fi
           
-          # Check 3: Compilation errors (excluding benign messages)
-          ERROR_COUNT=$(grep -c "\[ERROR\]" compile.log 2>/dev/null || echo "0")
-          # Filter out non-critical errors
-          REAL_ERRORS=$(grep "\[ERROR\]" compile.log 2>/dev/null | grep -v "Re-run Maven" | grep -v "For more information" | wc -l || echo "0")
-          
-          if [ "$REAL_ERRORS" -gt 0 ]; then
+          # Check 3: TestNG specific failures
+          if grep -q "Tests run:.*Failures: [1-9]" test-output.log; then
             FAILED=true
-            FAILURE_REASON="Found $REAL_ERRORS compilation error(s)"
+            FAILURE_REASON="TestNG test failures"
           fi
           
-          # Check 4: Specific compilation failure indicators
-          if grep -q "COMPILATION ERROR" compile.log; then
+          if grep -q "Tests run:.*Errors: [1-9]" test-output.log; then
             FAILED=true
-            FAILURE_REASON="COMPILATION ERROR detected"
+            FAILURE_REASON="TestNG test errors"
           fi
+          
+          # Extract test summary if available
+          TEST_SUMMARY=$(grep -E "Tests run: [0-9]+" test-output.log | tail -1 || echo "No test summary found")
+          echo "test_summary=$TEST_SUMMARY" >> $GITHUB_OUTPUT
           
           # Set outputs and exit appropriately
           if [ "$FAILED" = true ]; then
@@ -88,11 +92,11 @@ jobs:
             echo "reason=$FAILURE_REASON" >> $GITHUB_OUTPUT
             echo ""
             echo "=========================================="
-            echo "❌ COMPILATION FAILED: $FAILURE_REASON"
+            echo "❌ TEST EXECUTION FAILED: $FAILURE_REASON"
             echo "=========================================="
             echo ""
             echo "Error details:"
-            grep "\[ERROR\]" compile.log | grep -v "Re-run Maven" | grep -v "For more information" || true
+            grep -E "\[ERROR\]|FAILURE|Exception|Error:" test-output.log | grep -v "Re-run Maven" | head -30 || true
             echo ""
             exit 1
           else
@@ -100,33 +104,35 @@ jobs:
             echo "exit_code=0" >> $GITHUB_OUTPUT
             echo ""
             echo "=========================================="
-            echo "✅ COMPILATION SUCCESSFUL"
+            echo "✅ TEST EXECUTION SUCCESSFUL"
+            echo "Test Summary: $TEST_SUMMARY"
             echo "=========================================="
           fi
 
-      - name: Verify Compile Status
+      - name: Verify Test Status
         if: always()
         run: |
-          echo "Compile status: ${{ steps.compile.outputs.status }}"
-          echo "Exit code: ${{ steps.compile.outputs.exit_code }}"
-          echo "Reason: ${{ steps.compile.outputs.reason }}"
+          echo "Test status: ${{ steps.test.outputs.status }}"
+          echo "Exit code: ${{ steps.test.outputs.exit_code }}"
+          echo "Reason: ${{ steps.test.outputs.reason }}"
+          echo "Test Summary: ${{ steps.test.outputs.test_summary }}"
           
-          if [ -f compile_exit_code.txt ]; then
-            echo "Maven exit code from file: $(cat compile_exit_code.txt)"
+          if [ -f test_exit_code.txt ]; then
+            echo "Maven exit code from file: $(cat test_exit_code.txt)"
           fi
 
       - name: Run Checkstyle (Report Only)
-        if: steps.compile.outputs.status == 'success'
+        if: steps.test.outputs.status == 'success'
         run: mvn checkstyle:checkstyle || true
         continue-on-error: true
 
       - name: Run PMD (Report Only)
-        if: steps.compile.outputs.status == 'success'
+        if: steps.test.outputs.status == 'success'
         run: mvn pmd:pmd || true
         continue-on-error: true
 
       - name: Run SpotBugs (Report Only)
-        if: steps.compile.outputs.status == 'success'
+        if: steps.test.outputs.status == 'success'
         run: mvn spotbugs:spotbugs || true
         continue-on-error: true
 
@@ -138,24 +144,25 @@ jobs:
           echo "**Build Date:** $(date)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          # Compilation Status
-          echo "### 🔨 Compilation" >> $GITHUB_STEP_SUMMARY
-          COMPILE_STATUS="${{ steps.compile.outputs.status }}"
+          # Test Execution Status
+          echo "### 🧪 Test Execution" >> $GITHUB_STEP_SUMMARY
+          TEST_STATUS="${{ steps.test.outputs.status }}"
           
-          if [ "$COMPILE_STATUS" = "success" ]; then
+          if [ "$TEST_STATUS" = "success" ]; then
             echo "✅ **Status:** SUCCESS" >> $GITHUB_STEP_SUMMARY
+            echo "**Summary:** ${{ steps.test.outputs.test_summary }}" >> $GITHUB_STEP_SUMMARY
           else
             echo "❌ **Status:** FAILED" >> $GITHUB_STEP_SUMMARY
-            echo "**Reason:** ${{ steps.compile.outputs.reason }}" >> $GITHUB_STEP_SUMMARY
+            echo "**Reason:** ${{ steps.test.outputs.reason }}" >> $GITHUB_STEP_SUMMARY
             
-            if [ -f "compile.log" ]; then
+            if [ -f "test-output.log" ]; then
               echo "" >> $GITHUB_STEP_SUMMARY
-              echo "<details><summary>📋 Click to see compilation errors</summary>" >> $GITHUB_STEP_SUMMARY
+              echo "<details><summary>📋 Click to see error details</summary>" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
               echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
               
               # Extract error lines
-              grep "\[ERROR\]" compile.log | grep -v "Re-run Maven" | grep -v "For more information" | head -20 >> $GITHUB_STEP_SUMMARY || echo "See compile.log artifact for full details"
+              grep -E "\[ERROR\]|COMPILATION ERROR|Failures:|Errors:" test-output.log | grep -v "Re-run Maven" | head -30 >> $GITHUB_STEP_SUMMARY || echo "See test-output.log artifact for full details"
               
               echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
@@ -164,8 +171,8 @@ jobs:
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          # Only show linting results if compilation succeeded
-          if [ "$COMPILE_STATUS" = "success" ]; then
+          # Only show linting results if tests passed
+          if [ "$TEST_STATUS" = "success" ]; then
             # Checkstyle Summary
             if [ -f "target/checkstyle-result.xml" ]; then
               CHECKSTYLE_ERRORS=$(grep -o 'severity="error"' target/checkstyle-result.xml | wc -l || echo "0")
@@ -197,7 +204,7 @@ jobs:
             fi
           else
             echo "### ⚠️ Linting Skipped" >> $GITHUB_STEP_SUMMARY
-            echo "Linting tools were not run due to compilation failure." >> $GITHUB_STEP_SUMMARY
+            echo "Linting tools were not run due to test/compilation failure." >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
           fi
 
@@ -207,8 +214,9 @@ jobs:
         with:
           name: code-quality-reports
           path: |
-            compile.log
-            compile_exit_code.txt
+            test-output.log
+            test_exit_code.txt
+            target/surefire-reports/
             target/checkstyle-result.xml
             target/pmd.xml
             target/spotbugsXml.xml
@@ -224,39 +232,44 @@ jobs:
             const fs = require('fs');
             let comment = '## 🔍 Code Quality Analysis Results\n\n';
             
-            const compileStatus = '${{ steps.compile.outputs.status }}';
-            const exitCode = '${{ steps.compile.outputs.exit_code }}';
-            const failureReason = '${{ steps.compile.outputs.reason }}';
+            const testStatus = '${{ steps.test.outputs.status }}';
+            const exitCode = '${{ steps.test.outputs.exit_code }}';
+            const failureReason = '${{ steps.test.outputs.reason }}';
+            const testSummary = '${{ steps.test.outputs.test_summary }}';
             
-            // Compilation Status
-            comment += '### 🔨 Compilation\n';
-            if (compileStatus === 'success') {
-              comment += '✅ **SUCCESS**\n\n';
+            // Test Execution Status
+            comment += '### 🧪 Test Execution\n';
+            if (testStatus === 'success') {
+              comment += '✅ **SUCCESS**\n';
+              comment += `**Summary:** ${testSummary}\n\n`;
             } else {
               comment += `❌ **FAILED**\n`;
               comment += `**Reason:** ${failureReason}\n\n`;
               
               // Try to extract and show errors
               try {
-                if (fs.existsSync('compile.log')) {
-                  const log = fs.readFileSync('compile.log', 'utf8');
+                if (fs.existsSync('test-output.log')) {
+                  const log = fs.readFileSync('test-output.log', 'utf8');
                   const errorLines = log.split('\n')
-                    .filter(line => line.includes('[ERROR]') && !line.includes('Re-run Maven') && !line.includes('For more information'))
-                    .slice(0, 10);
+                    .filter(line => 
+                      (line.includes('[ERROR]') || line.includes('COMPILATION ERROR') || line.includes('Exception')) 
+                      && !line.includes('Re-run Maven')
+                    )
+                    .slice(0, 15);
                   
                   if (errorLines.length > 0) {
-                    comment += '<details><summary>📋 Compilation Errors (first 10)</summary>\n\n```\n';
+                    comment += '<details><summary>📋 Error Details (first 15 lines)</summary>\n\n```\n';
                     comment += errorLines.join('\n');
                     comment += '\n```\n</details>\n\n';
                   }
                 }
               } catch (e) {
-                console.log('Could not parse compilation errors:', e);
+                console.log('Could not parse test errors:', e);
               }
             }
             
-            // Only show linting if compilation succeeded
-            if (compileStatus === 'success') {
+            // Only show linting if tests passed
+            if (testStatus === 'success') {
               // Parse Checkstyle
               try {
                 if (fs.existsSync('target/checkstyle-result.xml')) {
@@ -299,7 +312,7 @@ jobs:
               }
             } else {
               comment += '### ⚠️ Linting Analysis\n';
-              comment += 'Skipped due to compilation failure.\n\n';
+              comment += 'Skipped due to test/compilation failure.\n\n';
             }
             
             comment += '---\n';
