@@ -56,7 +56,7 @@ jobs:
             echo "status=failed" >> $GITHUB_OUTPUT
             echo "exit_code=1" >> $GITHUB_OUTPUT
             echo "❌ COMPILATION FAILED (BUILD FAILURE detected in logs)"
-          elif grep -q "\[ERROR\]" compile.log | grep -v "ERROR\] Re-run Maven"; then
+          elif grep "\[ERROR\]" compile.log | grep -qv "Re-run Maven"; then
             echo "status=failed" >> $GITHUB_OUTPUT
             echo "exit_code=1" >> $GITHUB_OUTPUT
             echo "❌ COMPILATION FAILED (ERROR detected in logs)"
@@ -70,7 +70,6 @@ jobs:
           echo "=== COMPILE LOG ==="
           cat compile.log
           echo "==================="
-        continue-on-error: true
 
       - name: Verify Compile Status
         if: always()
