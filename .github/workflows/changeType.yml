@@ -2,13 +2,11 @@ name: PR Change Detector
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened]  # Added types
     branches:
       - main
       - develop
-  push:
-    branches:
-      - main
-      - develop
+  # Remove push trigger - we only care about PRs
 
 # Required for PR comments
 permissions:
@@ -31,7 +29,6 @@ jobs:
           fetch-depth: 0
 
       - name: Detect change types
-        if: always()
         id: changes
         run: |
           # Get list of changed files in the PR
@@ -58,7 +55,7 @@ jobs:
               echo "Framework change detected: $file"
             fi
             
-            # Test case changes: /tests directory
+            # Test case changes: /tests directory or module2
             if [[ "$file" =~ ^module2/ ]] || [[ "$file" =~ /java/module2/ ]]; then
               TEST_CHANGES="true"
               echo "Test change detected: $file"
@@ -88,7 +85,6 @@ jobs:
           echo "Config changes: $CONFIG_CHANGES"
 
       - name: Add labels based on changes
-        if: always()
         uses: actions/github-script@v7
         with:
           script: |
@@ -96,25 +92,28 @@ jobs:
             const tests = '${{ steps.changes.outputs.tests }}' === 'true';
             const config = '${{ steps.changes.outputs.config }}' === 'true';
             
+            console.log(`Framework: ${framework}, Tests: ${tests}, Config: ${config}`);
+            
             const labelsToAdd = [];
             const labelsToRemove = [];
             
-            // Define label mappings
-            const labelMap = {
-              framework: 'framework',
-              tests: 'tests',
-              config: 'config'
-            };
+            // Use simple label names (no "type:" prefix)
+            const allPossibleLabels = ['framework', 'tests', 'config'];
             
-            // Determine which labels to add/remove
-            if (framework) labelsToAdd.push(labelMap.framework);
-            else labelsToRemove.push(labelMap.framework);
+            // Determine which labels to add
+            if (framework) labelsToAdd.push('framework');
+            if (tests) labelsToAdd.push('tests');
+            if (config) labelsToAdd.push('config');
             
-            if (tests) labelsToAdd.push(labelMap.tests);
-            else labelsToRemove.push(labelMap.tests);
+            // Labels to remove are those not being added
+            for (const label of allPossibleLabels) {
+              if (!labelsToAdd.includes(label)) {
+                labelsToRemove.push(label);
+              }
+            }
             
-            if (config) labelsToAdd.push(labelMap.config);
-            else labelsToRemove.push(labelMap.config);
+            console.log(`Labels to add: ${labelsToAdd.join(', ') || 'none'}`);
+            console.log(`Labels to remove: ${labelsToRemove.join(', ') || 'none'}`);
             
             // Get current labels on the PR
             const { data: currentLabels } = await github.rest.issues.listLabelsOnIssue({
@@ -123,6 +122,8 @@ jobs:
               issue_number: context.issue.number
             });
             const currentLabelNames = currentLabels.map(l => l.name);
+            
+            console.log(`Current labels: ${currentLabelNames.join(', ') || 'none'}`);
             
             // Add new labels
             const labelsToActuallyAdd = labelsToAdd.filter(l => !currentLabelNames.includes(l));
@@ -133,7 +134,9 @@ jobs:
                 issue_number: context.issue.number,
                 labels: labelsToActuallyAdd
               });
-              console.log(`Added labels: ${labelsToActuallyAdd.join(', ')}`);
+              console.log(`✅ Added labels: ${labelsToActuallyAdd.join(', ')}`);
+            } else {
+              console.log('No new labels to add');
             }
             
             // Remove labels that no longer apply
@@ -146,15 +149,14 @@ jobs:
                     issue_number: context.issue.number,
                     name: label
                   });
-                  console.log(`Removed label: ${label}`);
+                  console.log(`✅ Removed label: ${label}`);
                 } catch (e) {
-                  // Label might not exist, ignore
+                  console.log(`Could not remove label ${label}: ${e.message}`);
                 }
               }
             }
 
       - name: Post change summary comment
-        if: always()
         uses: actions/github-script@v7
         with:
           script: |
@@ -166,8 +168,20 @@ jobs:
             body += '| Category | Detected | Review Focus |\n';
             body += '|----------|----------|-------------|\n';
             body += `| 🔧 Framework (\`/utils\`, \`/dal\`, etc.) | ${framework ? '✅ Yes' : '❌ No'} | ${framework ? '**High** - Core framework impact' : 'N/A'} |\n`;
-            body += `| 🧪 Test Cases (\`/tests\`) | ${tests ? '✅ Yes' : '❌ No'} | ${tests ? 'Standard - Test coverage' : 'N/A'} |\n`;
+            body += `| 🧪 Test Cases (\`/module2\`) | ${tests ? '✅ Yes' : '❌ No'} | ${tests ? 'Standard - Test coverage' : 'N/A'} |\n`;
             body += `| ⚙️ Config (\`*.conf\`) | ${config ? '✅ Yes' : '❌ No'} | ${config ? '**Medium** - Environment impact' : 'N/A'} |\n`;
+            
+            // Add approval requirements info
+            body += '\n### 📝 Approval Requirements\n';
+            if (framework) {
+              body += '- **Framework changes**: Requires **2 approvals** (at least 1 from QTF core team)\n';
+            }
+            if (tests && !framework) {
+              body += '- **Test-only changes**: Requires **2 approvals** (any reviewers)\n';
+            }
+            if (!framework && !tests) {
+              body += '- **Other changes**: Requires **1 approval**\n';
+            }
             
             // Add review guidance based on detected changes
             if (framework) {
@@ -202,6 +216,7 @@ jobs:
                 comment_id: botComment.id,
                 body: body
               });
+              console.log('✅ Updated existing comment');
             } else {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
@@ -209,4 +224,5 @@ jobs:
                 issue_number: context.issue.number,
                 body: body
               });
+              console.log('✅ Created new comment');
             }
