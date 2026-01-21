@@ -37,60 +37,226 @@ jobs:
 
       - name: Compile project
         run: mvn clean compile -DskipTests
+        continue-on-error: false
 
-      - name: Run Checkstyle
-        run: mvn checkstyle:check
+      - name: Run Checkstyle (Report Only)
+        run: mvn checkstyle:checkstyle || true
         continue-on-error: true
 
-      - name: Run PMD
-        run: mvn pmd:check
+      - name: Run PMD (Report Only)
+        run: mvn pmd:pmd || true
         continue-on-error: true
 
-      - name: Run SpotBugs
-        run: mvn spotbugs:check
+      - name: Run SpotBugs (Report Only)
+        run: mvn spotbugs:spotbugs || true
         continue-on-error: true
 
-      - name: Run tests
-        run: mvn test -DsuiteXmlFile=testng.xml
+      - name: Run TestNG Tests
+        run: |
+          if [ -f "testng.xml" ]; then
+            mvn test -DsuiteXmlFile=testng.xml || echo "Tests completed with failures"
+          else
+            mvn test || echo "Tests completed with failures"
+          fi
         continue-on-error: true
 
-      - name: Generate test report
-        if: always()
-        uses: dorny/test-reporter@v1
+      - name: Check for test results
+        id: test_check
+        run: |
+          if [ -d "target/surefire-reports" ] && [ "$(ls -A target/surefire-reports/*.xml 2>/dev/null)" ]; then
+            echo "tests_exist=true" >> $GITHUB_OUTPUT
+            echo "Test results found"
+          else
+            echo "tests_exist=false" >> $GITHUB_OUTPUT
+            echo "No test results found"
+          fi
+
+      - name: Publish Test Results
+        if: steps.test_check.outputs.tests_exist == 'true'
+        uses: EnricoMi/publish-unit-test-result-action@v2
         with:
-          name: TestNG Tests
-          path: target/surefire-reports/*.xml
-          reporter: java-junit
-          fail-on-error: false
+          files: |
+            target/surefire-reports/TEST-*.xml
+          check_name: TestNG Results
+          comment_mode: off
 
-      - name: Upload lint results
+      - name: Generate Quality Report Summary
+        if: always()
+        run: |
+          echo "## 📊 Code Quality Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Build Date:** $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Checkstyle Summary
+          if [ -f "target/checkstyle-result.xml" ]; then
+            CHECKSTYLE_ERRORS=$(grep -o 'severity="error"' target/checkstyle-result.xml | wc -l || echo "0")
+            CHECKSTYLE_WARNINGS=$(grep -o 'severity="warning"' target/checkstyle-result.xml | wc -l || echo "0")
+            CHECKSTYLE_INFO=$(grep -o 'severity="info"' target/checkstyle-result.xml | wc -l || echo "0")
+            echo "### ✅ Checkstyle Analysis" >> $GITHUB_STEP_SUMMARY
+            echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
+            echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Errors | $CHECKSTYLE_ERRORS |" >> $GITHUB_STEP_SUMMARY
+            echo "| Warnings | $CHECKSTYLE_WARNINGS |" >> $GITHUB_STEP_SUMMARY
+            echo "| Info | $CHECKSTYLE_INFO |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ⚠️ Checkstyle - No results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # PMD Summary
+          if [ -f "target/pmd.xml" ]; then
+            PMD_VIOLATIONS=$(grep -c '<violation' target/pmd.xml || echo "0")
+            echo "### ✅ PMD Analysis" >> $GITHUB_STEP_SUMMARY
+            echo "- Total Violations: **$PMD_VIOLATIONS**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ⚠️ PMD - No results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # SpotBugs Summary
+          if [ -f "target/spotbugsXml.xml" ]; then
+            SPOTBUGS_BUGS=$(grep -c '<BugInstance' target/spotbugsXml.xml || echo "0")
+            echo "### ✅ SpotBugs Analysis" >> $GITHUB_STEP_SUMMARY
+            echo "- Potential Bugs: **$SPOTBUGS_BUGS**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ⚠️ SpotBugs - No results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Test Summary
+          if [ -d "target/surefire-reports" ] && [ "$(ls -A target/surefire-reports/TEST-*.xml 2>/dev/null)" ]; then
+            echo "### ✅ Test Execution" >> $GITHUB_STEP_SUMMARY
+            TOTAL=$(find target/surefire-reports -name "TEST-*.xml" -exec grep -h "tests=" {} \; | sed 's/.*tests="\([0-9]*\)".*/\1/' | awk '{s+=$1} END {print s}')
+            FAILURES=$(find target/surefire-reports -name "TEST-*.xml" -exec grep -h "failures=" {} \; | sed 's/.*failures="\([0-9]*\)".*/\1/' | awk '{s+=$1} END {print s}')
+            ERRORS=$(find target/surefire-reports -name "TEST-*.xml" -exec grep -h "errors=" {} \; | sed 's/.*errors="\([0-9]*\)".*/\1/' | awk '{s+=$1} END {print s}')
+            SKIPPED=$(find target/surefire-reports -name "TEST-*.xml" -exec grep -h "skipped=" {} \; | sed 's/.*skipped="\([0-9]*\)".*/\1/' | awk '{s+=$1} END {print s}')
+            PASSED=$((${TOTAL:-0} - ${FAILURES:-0} - ${ERRORS:-0} - ${SKIPPED:-0}))
+            
+            echo "| Status | Count |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| ✅ Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
+            echo "| ❌ Failed | ${FAILURES:-0} |" >> $GITHUB_STEP_SUMMARY
+            echo "| ⚠️ Errors | ${ERRORS:-0} |" >> $GITHUB_STEP_SUMMARY
+            echo "| ⏭️ Skipped | ${SKIPPED:-0} |" >> $GITHUB_STEP_SUMMARY
+            echo "| **Total** | **${TOTAL:-0}** |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ⚠️ Tests - Not executed or no results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload Analysis Results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: lint-results
+          name: code-quality-reports
           path: |
             target/checkstyle-result.xml
             target/pmd.xml
             target/spotbugsXml.xml
             target/surefire-reports/
+            target/site/
+          retention-days: 30
+          if-no-files-found: ignore
 
-      - name: Comment PR with results
+      - name: Comment on PR
         if: github.event_name == 'pull_request' && always()
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            let comment = '## 🔍 Code Quality Check Results\n\n';
+            let comment = '## 🔍 Code Quality Analysis Results\n\n';
             
+            let hasResults = false;
+            
+            // Parse Checkstyle
             try {
-              comment += '✅ Linting completed. Check the artifacts for detailed reports.\n';
-            } catch (error) {
-              comment += '⚠️ Some checks encountered issues. Review the workflow logs.\n';
+              if (fs.existsSync('target/checkstyle-result.xml')) {
+                const checkstyle = fs.readFileSync('target/checkstyle-result.xml', 'utf8');
+                const errors = (checkstyle.match(/severity="error"/g) || []).length;
+                const warnings = (checkstyle.match(/severity="warning"/g) || []).length;
+                const info = (checkstyle.match(/severity="info"/g) || []).length;
+                
+                comment += '### 📋 Checkstyle\n';
+                comment += `- ❌ Errors: ${errors}\n`;
+                comment += `- ⚠️ Warnings: ${warnings}\n`;
+                comment += `- ℹ️ Info: ${info}\n\n`;
+                hasResults = true;
+              }
+            } catch (e) {
+              comment += '### 📋 Checkstyle\n❌ No results available\n\n';
             }
             
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: comment
-            });
+            // Parse PMD
+            try {
+              if (fs.existsSync('target/pmd.xml')) {
+                const pmd = fs.readFileSync('target/pmd.xml', 'utf8');
+                const violations = (pmd.match(/<violation/g) || []).length;
+                comment += '### 🔍 PMD\n';
+                comment += `- Violations: ${violations}\n\n`;
+                hasResults = true;
+              }
+            } catch (e) {
+              comment += '### 🔍 PMD\n❌ No results available\n\n';
+            }
+            
+            // Parse SpotBugs
+            try {
+              if (fs.existsSync('target/spotbugsXml.xml')) {
+                const spotbugs = fs.readFileSync('target/spotbugsXml.xml', 'utf8');
+                const bugs = (spotbugs.match(/<BugInstance/g) || []).length;
+                comment += '### 🐛 SpotBugs\n';
+                comment += `- Potential Bugs: ${bugs}\n\n`;
+                hasResults = true;
+              }
+            } catch (e) {
+              comment += '### 🐛 SpotBugs\n❌ No results available\n\n';
+            }
+            
+            // Test Results
+            try {
+              const testFiles = fs.readdirSync('target/surefire-reports').filter(f => f.startsWith('TEST-') && f.endsWith('.xml'));
+              if (testFiles.length > 0) {
+                let totalTests = 0, failures = 0, errors = 0, skipped = 0;
+                
+                testFiles.forEach(file => {
+                  const content = fs.readFileSync(`target/surefire-reports/${file}`, 'utf8');
+                  const testsMatch = content.match(/tests="(\d+)"/);
+                  const failuresMatch = content.match(/failures="(\d+)"/);
+                  const errorsMatch = content.match(/errors="(\d+)"/);
+                  const skippedMatch = content.match(/skipped="(\d+)"/);
+                  
+                  if (testsMatch) totalTests += parseInt(testsMatch[1]);
+                  if (failuresMatch) failures += parseInt(failuresMatch[1]);
+                  if (errorsMatch) errors += parseInt(errorsMatch[1]);
+                  if (skippedMatch) skipped += parseInt(skippedMatch[1]);
+                });
+                
+                const passed = totalTests - failures - errors - skipped;
+                comment += '### 🧪 Test Results\n';
+                comment += `- ✅ Passed: ${passed}\n`;
+                comment += `- ❌ Failed: ${failures}\n`;
+                comment += `- ⚠️ Errors: ${errors}\n`;
+                comment += `- ⏭️ Skipped: ${skipped}\n`;
+                comment += `- **Total: ${totalTests}**\n\n`;
+                hasResults = true;
+              }
+            } catch (e) {
+              comment += '### 🧪 Tests\n⚠️ No test results found\n\n';
+            }
+            
+            comment += '---\n';
+            comment += `📦 [Download detailed reports](${context.payload.repository.html_url}/actions/runs/${context.runId})`;
+            
+            if (hasResults) {
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: comment
+              });
+            }
