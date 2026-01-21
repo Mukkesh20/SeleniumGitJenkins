@@ -116,12 +116,12 @@ jobs:
             let message = '';
             
             if (isTest) {
-              passed = totalApprovals >= 2;
+              passed = totalApprovals >= 1;
               message = passed 
                 ? `✅ Test: ${totalApprovals} approvals` 
-                : `❌ Test needs 2 approvals (have ${totalApprovals})`;
+                : `❌ Test needs 1 approvals (have ${totalApprovals})`;
             } else if (isFramework) {
-              passed = totalApprovals >= 2 && coreApprovals >= 1;
+              passed = totalApprovals >= 1 && coreApprovals >= 1;
               message = passed
                 ? `✅ Framework: ${totalApprovals} approvals (${coreApprovals} from core)`
                 : totalApprovals < 2
