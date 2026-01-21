@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE suite SYSTEM "http://testng.org/testng-1.0.dtd">
+<suite name="Demo Suite" parallel="tests" thread-count="100">
+    <test name="AHA Transfer Failover - Shard Instance">
+        <classes>
+            <class name="src.test.java.module1.class1" />
+        </classes>
+    </test>
+</suite>
