@@ -21,7 +21,7 @@ public class class4 {
 	
 	@BeforeMethod
 	public void beforeMethod4() {
-		System.out.println("beforeMethod4 executed");
+		System.out.println("beforeMethod4wfwergwg executed");
 	}
 	@Test 
 	@Step("Step")
