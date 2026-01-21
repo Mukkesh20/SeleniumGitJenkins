@@ -4,10 +4,7 @@ on:
   pull_request_review:
     types: [submitted, dismissed]
   pull_request:
-    types: [labeled, unlabeled]
-  workflow_run:
-    workflows: ["PR Change Detector"]  # Must match label workflow name exactly
-    types: [completed]
+    types: [labeled, unlabeled]  # Only label events, NOT opened/synchronize
 
 permissions:
   contents: read
