@@ -3,7 +3,7 @@ name: Auto-Merge PR
 on:
   pull_request_review:
     types: [submitted]
-  check_run:
+  check_suite:
     types: [completed]
   status: {}
 
@@ -14,7 +14,6 @@ permissions:
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    if: github.event.review.state == 'approved' || github.event.check_run.conclusion == 'success' || github.event.state == 'success'
     
     steps:
       - name: Get PR number
@@ -28,11 +27,11 @@ jobs:
               prNumber = context.payload.pull_request.number;
             } else if (context.payload.review) {
               prNumber = context.payload.review.pull_request.number;
-            } else if (context.payload.check_run) {
+            } else if (context.payload.check_suite) {
               const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                commit_sha: context.payload.check_run.head_sha
+                commit_sha: context.payload.check_suite.head_sha
               });
               if (prs.length > 0) {
                 prNumber = prs[0].number;
@@ -40,19 +39,23 @@ jobs:
             }
             
             if (!prNumber) {
-              console.log('No PR found');
+              console.log('No PR found, skipping');
               return;
             }
             
             core.setOutput('number', prNumber);
-            console.log(`PR #${prNumber}`);
+            console.log(`Found PR #${prNumber}`);
       
-      - name: Check if ready to auto-merge
+      - name: Check and auto-merge
         if: steps.pr.outputs.number != ''
         uses: actions/github-script@v7
         with:
           script: |
             const prNumber = parseInt('${{ steps.pr.outputs.number }}');
+            
+            console.log('='.repeat(60));
+            console.log(`Auto-Merge Check for PR #${prNumber}`);
+            console.log('='.repeat(60));
             
             // Get PR details
             const { data: pr } = await github.rest.pulls.get({
@@ -61,49 +64,87 @@ jobs:
               pull_number: prNumber
             });
             
-            // Skip if draft or closed
-            if (pr.draft || pr.state !== 'open') {
-              console.log('PR is draft or not open, skipping');
+            // Skip if draft or not open
+            if (pr.draft) {
+              console.log('❌ PR is draft, skipping auto-merge');
+              return;
+            }
+            
+            if (pr.state !== 'open') {
+              console.log('❌ PR is not open, skipping auto-merge');
               return;
             }
             
             const labels = pr.labels.map(l => l.name);
-            console.log(`Labels: ${labels.join(', ')}`);
+            console.log(`Labels: ${labels.join(', ') || 'none'}`);
             
             const isFramework = labels.includes('framework');
             const isTest = labels.some(l => l === 'tests' || l === 'test' || l.includes('test'));
             
+            console.log(`Framework: ${isFramework}, Test: ${isTest}`);
+            
             // Only auto-merge test and framework changes
             if (!isFramework && !isTest) {
-              console.log('Not a test/framework change, skipping auto-merge');
+              console.log('⏭️  Not a test/framework change, skipping auto-merge');
               return;
             }
             
-            console.log(`Framework: ${isFramework}, Test: ${isTest}`);
-            
-            // Check if all required checks passed
-            const { data: checks } = await github.rest.checks.listForRef({
+            // Check if validation check passed
+            const { data: checkRuns } = await github.rest.checks.listForRef({
               owner: context.repo.owner,
               repo: context.repo.repo,
               ref: pr.head.sha
             });
             
-            const requiredCheck = checks.check_runs.find(c => c.name === 'validate-approvals');
+            const validationCheck = checkRuns.check_runs.find(c => c.name === 'validate-approvals');
             
-            if (!requiredCheck) {
-              console.log('validate-approvals check not found yet');
+            if (!validationCheck) {
+              console.log('⏳ validate-approvals check not found yet');
               return;
             }
             
-            if (requiredCheck.status !== 'completed' || requiredCheck.conclusion !== 'success') {
-              console.log(`validate-approvals status: ${requiredCheck.status}, conclusion: ${requiredCheck.conclusion}`);
+            console.log(`validate-approvals status: ${validationCheck.status}`);
+            console.log(`validate-approvals conclusion: ${validationCheck.conclusion}`);
+            
+            if (validationCheck.status !== 'completed') {
+              console.log('⏳ validate-approvals still running');
+              return;
+            }
+            
+            if (validationCheck.conclusion !== 'success') {
+              console.log('❌ validate-approvals did not pass, cannot auto-merge');
+              return;
+            }
+            
+            // Check other required checks
+            const failedChecks = checkRuns.check_runs.filter(c => 
+              c.status === 'completed' && 
+              c.conclusion !== 'success' && 
+              c.conclusion !== 'neutral' &&
+              c.conclusion !== 'skipped'
+            );
+            
+            if (failedChecks.length > 0) {
+              console.log('❌ Some checks failed:');
+              failedChecks.forEach(c => console.log(`  - ${c.name}: ${c.conclusion}`));
+              return;
+            }
+            
+            const incompleteChecks = checkRuns.check_runs.filter(c => 
+              c.status !== 'completed' &&
+              c.name !== 'auto-merge' // Ignore this workflow
+            );
+            
+            if (incompleteChecks.length > 0) {
+              console.log('⏳ Some checks still running:');
+              incompleteChecks.forEach(c => console.log(`  - ${c.name}`));
               return;
             }
             
             console.log('✅ All checks passed, attempting auto-merge');
             
             try {
-              // Try to enable auto-merge (requires repo settings)
+              // Try GraphQL auto-merge first
               await github.graphql(`
                 mutation($pullRequestId: ID!) {
                   enablePullRequestAutoMerge(input: {
@@ -121,38 +162,49 @@ jobs:
                 pullRequestId: pr.node_id
               });
               
-              console.log('✅ Auto-merge enabled');
+              console.log('✅ Auto-merge enabled via GraphQL');
               
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: prNumber,
-                body: '🤖 Auto-merge enabled - PR will merge automatically once all checks pass'
+                body: '🤖 **Auto-merge enabled**\n\nAll approval requirements met. PR will merge automatically.'
               });
               
-            } catch (error) {
-              // If auto-merge feature not available, try direct merge
-              console.log('Auto-merge feature not available, attempting direct merge');
+            } catch (graphqlError) {
+              console.log('GraphQL auto-merge not available, trying direct merge');
+              console.log(`Error: ${graphqlError.message}`);
               
+              // Fallback: Direct merge
               try {
-                await github.rest.pulls.merge({
+                const mergeResult = await github.rest.pulls.merge({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   pull_number: prNumber,
                   merge_method: 'squash',
                   commit_title: pr.title,
-                  commit_message: 'Auto-merged by GitHub Actions'
+                  commit_message: `Auto-merged by GitHub Actions\n\nAll approval requirements were met.`
                 });
                 
-                console.log('✅ PR merged successfully');
+                console.log('✅ PR merged successfully via REST API');
+                console.log(`Merge SHA: ${mergeResult.data.sha}`);
                 
                 await github.rest.issues.createComment({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   issue_number: prNumber,
-                  body: '🎉 PR auto-merged successfully!'
+                  body: '🎉 **PR auto-merged successfully!**\n\nAll approval requirements were met and checks passed.'
                 });
+                
               } catch (mergeError) {
-                console.log(`Could not merge: ${mergeError.message}`);
+                console.error('❌ Failed to merge PR');
+                console.error(`Error: ${mergeError.message}`);
+                
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  body: `⚠️ **Auto-merge failed**\n\nAll requirements were met but merge failed: ${mergeError.message}\n\nPlease merge manually.`
+                });
               }
             }
