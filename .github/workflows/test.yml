@@ -36,8 +36,11 @@ jobs:
           restore-keys: ${{ runner.os }}-m2
 
       - name: Compile project
-        run: mvn clean compile -DskipTests
-        continue-on-error: false
+        id: compile
+        run: |
+          mvn clean compile -DskipTests 2>&1 | tee compile.log
+          echo "compile_status=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+        continue-on-error: true
 
       - name: Run Checkstyle (Report Only)
         run: mvn checkstyle:checkstyle || true
@@ -53,10 +56,16 @@ jobs:
 
       - name: Run TestNG Tests
         run: |
+          echo "Attempting to run tests..."
           if [ -f "testng.xml" ]; then
-            mvn test -DsuiteXmlFile=testng.xml || echo "Tests completed with failures"
+            echo "Found testng.xml, attempting to run with suite file..."
+            mvn test -DsuiteXmlFile=testng.xml || {
+              echo "testng.xml failed, trying without suite file..."
+              mvn test || echo "Tests completed with issues"
+            }
           else
-            mvn test || echo "Tests completed with failures"
+            echo "No testng.xml found, running all tests..."
+            mvn test || echo "Tests completed with issues"
           fi
         continue-on-error: true
 
@@ -86,6 +95,24 @@ jobs:
           echo "## 📊 Code Quality Report" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Build Date:** $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Compilation Status
+          echo "### 🔨 Compilation" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.compile.outputs.compile_status }}" == "0" ]; then
+            echo "✅ **Status:** SUCCESS" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Status:** FAILED" >> $GITHUB_STEP_SUMMARY
+            if [ -f "compile.log" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "<details><summary>Click to see compilation errors</summary>" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+              grep -A 5 "\[ERROR\]" compile.log | head -50 >> $GITHUB_STEP_SUMMARY || echo "Check workflow logs for details"
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+              echo "</details>" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
           echo "" >> $GITHUB_STEP_SUMMARY
           
           # Checkstyle Summary
@@ -155,6 +182,7 @@ jobs:
         with:
           name: code-quality-reports
           path: |
+            compile.log
             target/checkstyle-result.xml
             target/pmd.xml
             target/spotbugsXml.xml
@@ -172,6 +200,30 @@ jobs:
             let comment = '## 🔍 Code Quality Analysis Results\n\n';
             
             let hasResults = false;
+            
+            // Compilation Status
+            const compileStatus = '${{ steps.compile.outputs.compile_status }}';
+            if (compileStatus === '0') {
+              comment += '### 🔨 Compilation\n✅ **SUCCESS**\n\n';
+            } else {
+              comment += '### 🔨 Compilation\n❌ **FAILED** - See workflow logs for details\n\n';
+              hasResults = true;
+              
+              // Try to extract error summary
+              try {
+                if (fs.existsSync('compile.log')) {
+                  const log = fs.readFileSync('compile.log', 'utf8');
+                  const errorLines = log.split('\n').filter(line => line.includes('[ERROR]')).slice(0, 5);
+                  if (errorLines.length > 0) {
+                    comment += '<details><summary>Compilation Errors (first 5)</summary>\n\n```\n';
+                    comment += errorLines.join('\n');
+                    comment += '\n```\n</details>\n\n';
+                  }
+                }
+              } catch (e) {
+                console.log('Could not parse compilation errors');
+              }
+            }
             
             // Parse Checkstyle
             try {
