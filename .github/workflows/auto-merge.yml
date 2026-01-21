@@ -79,10 +79,10 @@ jobs:
             console.log('='.repeat(60));
             console.log(`Labels: ${labels.join(', ') || 'none'}`);
             
-            const QTF_CORE_TEAM = ['username1', 'username2', 'username3']; // REPLACE
+            const QTF_CORE_TEAM = ['username1', 'username2', 'username3']; // REPLACE WITH ACTUAL USERNAMES
             
             const isFramework = labels.includes('framework');
-            const isTest = labels.includes('tests');
+            const isTest = labels.some(l => l === 'tests' || l === 'test' || l.includes('test'));
             
             console.log(`Framework: ${isFramework}, Test: ${isTest}`);
             
@@ -107,30 +107,45 @@ jobs:
             });
             
             const approvals = Object.values(latestReviews).filter(r => r.state === 'APPROVED');
+            const approvedBy = approvals.map(r => r.user.login);
             const totalApprovals = approvals.length;
             const coreApprovals = approvals.filter(r => QTF_CORE_TEAM.includes(r.user.login)).length;
             
             console.log(`Approvals: ${totalApprovals} (${coreApprovals} from core)`);
+            console.log(`Approved by: ${approvedBy.join(', ') || 'none'}`);
             
             let passed = false;
             let message = '';
             
             if (isTest) {
-              passed = totalApprovals >= 1;
-              message = passed 
-                ? `✅ Test: ${totalApprovals} approvals` 
-                : `❌ Test needs 1 approvals (have ${totalApprovals})`;
+              // TEST CHANGES: MUST HAVE 1 APPROVALS
+              if (totalApprovals >= 1) {
+                passed = true;
+                message = `✅ Test change approved: ${totalApprovals} approvals (requirement: 1)`;
+              } else {
+                passed = false;
+                message = `❌ Test change needs 1 approvals (current: ${totalApprovals}, need: ${1 - totalApprovals} more)`;
+              }
             } else if (isFramework) {
-              passed = totalApprovals >= 1 && coreApprovals >= 1;
-              message = passed
-                ? `✅ Framework: ${totalApprovals} approvals (${coreApprovals} from core)`
-                : totalApprovals < 2
-                  ? `❌ Framework needs 2 approvals (have ${totalApprovals})`
-                  : `❌ Framework needs core approval (team: ${QTF_CORE_TEAM.join(', ')})`;
+              // FRAMEWORK CHANGES: MUST HAVE 2 APPROVALS WITH 1 FROM CORE
+              if (totalApprovals >= 2 && coreApprovals >= 1) {
+                passed = true;
+                message = `✅ Framework change approved: ${totalApprovals} approvals (${coreApprovals} from core)`;
+              } else if (totalApprovals < 2) {
+                passed = false;
+                message = `❌ Framework needs 2 approvals (current: ${totalApprovals}, need: ${2 - totalApprovals} more)`;
+              } else {
+                passed = false;
+                message = `❌ Framework needs at least 1 core team approval (core team: ${QTF_CORE_TEAM.join(', ')})`;
+              }
             }
             
-            console.log(message);
+            console.log(`\n${message}`);
+            console.log(`Check will ${passed ? 'PASS ✅' : 'FAIL ❌'}`);
             
+            // CRITICAL: Fail the check if requirements not met
             if (!passed) {
               core.setFailed(message);
+            } else {
+              console.log('✅ All requirements met - merge allowed');
             }
