@@ -35,50 +35,84 @@ jobs:
           key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
           restore-keys: ${{ runner.os }}-m2
 
-      - name: Compile project and capture status
+      - name: Compile project
         id: compile
         run: |
           echo "Starting compilation..."
-          mvn clean compile -DskipTests > compile.log 2>&1
-          EXIT_CODE=$?
           
-          echo "Maven exit code: $EXIT_CODE"
+          # Run Maven and capture both output and exit code
+          set +e
+          mvn clean compile -DskipTests 2>&1 | tee compile.log
+          MAVEN_EXIT_CODE=${PIPESTATUS[0]}
+          set -e
           
-          # Save exit code to a file as well
-          echo $EXIT_CODE > compile_exit_code.txt
+          echo "Maven exit code: $MAVEN_EXIT_CODE"
+          echo $MAVEN_EXIT_CODE > compile_exit_code.txt
           
-          # Check for failure indicators
-          if [ $EXIT_CODE -ne 0 ]; then
-            echo "status=failed" >> $GITHUB_OUTPUT
-            echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
-            echo "❌ COMPILATION FAILED (exit code: $EXIT_CODE)"
-          elif grep -q "BUILD FAILURE" compile.log; then
+          # Determine compilation status
+          FAILED=false
+          FAILURE_REASON=""
+          
+          # Check 1: Maven exit code
+          if [ $MAVEN_EXIT_CODE -ne 0 ]; then
+            FAILED=true
+            FAILURE_REASON="Maven exited with code $MAVEN_EXIT_CODE"
+          fi
+          
+          # Check 2: BUILD FAILURE in output
+          if grep -q "BUILD FAILURE" compile.log; then
+            FAILED=true
+            FAILURE_REASON="BUILD FAILURE detected in output"
+          fi
+          
+          # Check 3: Compilation errors (excluding benign messages)
+          ERROR_COUNT=$(grep -c "\[ERROR\]" compile.log 2>/dev/null || echo "0")
+          # Filter out non-critical errors
+          REAL_ERRORS=$(grep "\[ERROR\]" compile.log 2>/dev/null | grep -v "Re-run Maven" | grep -v "For more information" | wc -l || echo "0")
+          
+          if [ "$REAL_ERRORS" -gt 0 ]; then
+            FAILED=true
+            FAILURE_REASON="Found $REAL_ERRORS compilation error(s)"
+          fi
+          
+          # Check 4: Specific compilation failure indicators
+          if grep -q "COMPILATION ERROR" compile.log; then
+            FAILED=true
+            FAILURE_REASON="COMPILATION ERROR detected"
+          fi
+          
+          # Set outputs and exit appropriately
+          if [ "$FAILED" = true ]; then
             echo "status=failed" >> $GITHUB_OUTPUT
             echo "exit_code=1" >> $GITHUB_OUTPUT
-            echo "❌ COMPILATION FAILED (BUILD FAILURE detected in logs)"
-          elif grep "\[ERROR\]" compile.log | grep -qv "Re-run Maven"; then
-            echo "status=failed" >> $GITHUB_OUTPUT
-            echo "exit_code=1" >> $GITHUB_OUTPUT
-            echo "❌ COMPILATION FAILED (ERROR detected in logs)"
+            echo "reason=$FAILURE_REASON" >> $GITHUB_OUTPUT
+            echo ""
+            echo "=========================================="
+            echo "❌ COMPILATION FAILED: $FAILURE_REASON"
+            echo "=========================================="
+            echo ""
+            echo "Error details:"
+            grep "\[ERROR\]" compile.log | grep -v "Re-run Maven" | grep -v "For more information" || true
+            echo ""
+            exit 1
           else
             echo "status=success" >> $GITHUB_OUTPUT
             echo "exit_code=0" >> $GITHUB_OUTPUT
+            echo ""
+            echo "=========================================="
             echo "✅ COMPILATION SUCCESSFUL"
+            echo "=========================================="
           fi
-          
-          # Always show the log
-          echo "=== COMPILE LOG ==="
-          cat compile.log
-          echo "==================="
 
       - name: Verify Compile Status
         if: always()
         run: |
           echo "Compile status: ${{ steps.compile.outputs.status }}"
           echo "Exit code: ${{ steps.compile.outputs.exit_code }}"
+          echo "Reason: ${{ steps.compile.outputs.reason }}"
           
           if [ -f compile_exit_code.txt ]; then
-            echo "Exit code from file: $(cat compile_exit_code.txt)"
+            echo "Maven exit code from file: $(cat compile_exit_code.txt)"
           fi
 
       - name: Run Checkstyle (Report Only)
@@ -111,7 +145,8 @@ jobs:
           if [ "$COMPILE_STATUS" = "success" ]; then
             echo "✅ **Status:** SUCCESS" >> $GITHUB_STEP_SUMMARY
           else
-            echo "❌ **Status:** FAILED (Exit Code: ${{ steps.compile.outputs.exit_code }})" >> $GITHUB_STEP_SUMMARY
+            echo "❌ **Status:** FAILED" >> $GITHUB_STEP_SUMMARY
+            echo "**Reason:** ${{ steps.compile.outputs.reason }}" >> $GITHUB_STEP_SUMMARY
             
             if [ -f "compile.log" ]; then
               echo "" >> $GITHUB_STEP_SUMMARY
@@ -120,7 +155,7 @@ jobs:
               echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
               
               # Extract error lines
-              grep "\[ERROR\]" compile.log | grep -v "Re-run Maven" | head -20 >> $GITHUB_STEP_SUMMARY || echo "See compile.log artifact for full details"
+              grep "\[ERROR\]" compile.log | grep -v "Re-run Maven" | grep -v "For more information" | head -20 >> $GITHUB_STEP_SUMMARY || echo "See compile.log artifact for full details"
               
               echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
@@ -191,20 +226,22 @@ jobs:
             
             const compileStatus = '${{ steps.compile.outputs.status }}';
             const exitCode = '${{ steps.compile.outputs.exit_code }}';
+            const failureReason = '${{ steps.compile.outputs.reason }}';
             
             // Compilation Status
             comment += '### 🔨 Compilation\n';
             if (compileStatus === 'success') {
               comment += '✅ **SUCCESS**\n\n';
             } else {
-              comment += `❌ **FAILED** (Exit Code: ${exitCode})\n\n`;
+              comment += `❌ **FAILED**\n`;
+              comment += `**Reason:** ${failureReason}\n\n`;
               
               // Try to extract and show errors
               try {
                 if (fs.existsSync('compile.log')) {
                   const log = fs.readFileSync('compile.log', 'utf8');
                   const errorLines = log.split('\n')
-                    .filter(line => line.includes('[ERROR]') && !line.includes('Re-run Maven'))
+                    .filter(line => line.includes('[ERROR]') && !line.includes('Re-run Maven') && !line.includes('For more information'))
                     .slice(0, 10);
                   
                   if (errorLines.length > 0) {
