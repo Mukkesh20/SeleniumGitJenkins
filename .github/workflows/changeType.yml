@@ -46,7 +46,7 @@ jobs:
             fi
             
             # Test case changes: /tests directory
-            if [[ "$file" =~ ^tests/ ]] || [[ "$file" =~ /tests/ ]]; then
+            if [[ "$file" =~ ^module2/ ]] || [[ "$file" =~ /tests/ ]]; then
               TEST_CHANGES="true"
               echo "Test change detected: $file"
             fi
