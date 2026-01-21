@@ -269,7 +269,7 @@ jobs:
             }
             
             // Only show linting if tests passed
-            if (testStatus === 'success') {
+            if (true) {
               // Parse Checkstyle
               try {
                 if (fs.existsSync('target/checkstyle-result.xml')) {
