@@ -4,12 +4,15 @@ on:
   pull_request_review:
     types: [submitted, dismissed]
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [labeled, unlabeled]
+  workflow_run:
+    workflows: ["PR Change Detector"]  # Must match label workflow name exactly
+    types: [completed]
 
 permissions:
   contents: read
-  pull-requests: write  # Changed from 'read' to 'write'
-  issues: write         # Added
+  pull-requests: write
+  issues: write
 
 jobs:
   validate-approvals:
@@ -17,175 +20,120 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Get PR info
-        id: pr-info
+      - name: Get PR number
+        id: pr-number
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            try {
-              // Handle both pull_request and pull_request_review events
-              let pr;
-              if (context.payload.pull_request) {
-                pr = context.payload.pull_request;
-              } else if (context.payload.review) {
-                // For pull_request_review events
-                const { data: prData } = await github.rest.pulls.get({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  pull_number: context.payload.review.pull_request.number
-                });
-                pr = prData;
-              } else {
-                console.log('No PR found in context');
-                core.setOutput('number', '');
-                core.setOutput('labels', '');
+            let prNumber;
+            
+            if (context.eventName === 'workflow_run') {
+              // Get PR from the workflow_run event
+              const { data: prs } = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                head: `${context.repo.owner}:${context.payload.workflow_run.head_branch}`
+              });
+              
+              if (prs.length === 0) {
+                console.log('No open PR found for this branch');
                 return;
               }
               
-              const labels = pr.labels.map(l => l.name);
-              
-              core.setOutput('number', pr.number);
-              core.setOutput('labels', labels.join(','));
-              
-              console.log(`PR #${pr.number}`);
-              console.log(`Labels: ${labels.join(', ') || 'none'}`);
-            } catch (error) {
-              console.error('Error getting PR info:', error);
-              core.setFailed(`Failed to get PR info: ${error.message}`);
+              prNumber = prs[0].number;
+            } else if (context.payload.pull_request) {
+              prNumber = context.payload.pull_request.number;
             }
-      
-      - name: Validate approval requirements
-        if: steps.pr-info.outputs.number != ''
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const prNumber = parseInt('${{ steps.pr-info.outputs.number }}');
-            const labels = '${{ steps.pr-info.outputs.labels }}'.split(',').filter(Boolean);
             
-            // QTF Core Team - REPLACE WITH ACTUAL GITHUB USERNAMES
-            const QTF_CORE_TEAM = [
-              'username1',
-              'username2', 
-              'username3'
-            ];
-            
-            console.log('='.repeat(60));
-            console.log(`PR #${prNumber} - Approval Validation`);
-            console.log(`Event: ${context.eventName}`);
-            console.log('='.repeat(60));
-            
-            // Check for framework or tests labels
-            const isFramework = labels.includes('framework');
-            const isTest = labels.includes('tests');
-            
-            console.log(`\nChange Type:`);
-            console.log(`  Framework: ${isFramework}`);
-            console.log(`  Test: ${isTest}`);
-            console.log(`  Labels: ${labels.join(', ') || 'none'}`);
-            
-            // If no relevant label, pass the check
-            if (!isFramework && !isTest) {
-              console.log(`\n✅ No framework/test label - standard review process applies`);
+            if (!prNumber) {
+              console.log('Could not determine PR number');
               return;
             }
             
-            try {
-              // Get all reviews
-              const { data: reviews } = await github.rest.pulls.listReviews({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: prNumber
-              });
-              
-              // Get latest review state per reviewer
-              const latestReviews = {};
-              for (const review of reviews) {
-                const user = review.user.login;
-                if (!latestReviews[user] || 
-                    new Date(review.submitted_at) > new Date(latestReviews[user].submitted_at)) {
-                  latestReviews[user] = review;
-                }
+            core.setOutput('number', prNumber);
+            console.log(`PR #${prNumber}`);
+      
+      - name: Validate approvals
+        if: steps.pr-number.outputs.number != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = parseInt('${{ steps.pr-number.outputs.number }}');
+            
+            // Add small delay if triggered by workflow_run
+            if (context.eventName === 'workflow_run') {
+              console.log('Waiting for labels to be committed...');
+              await new Promise(resolve => setTimeout(resolve, 3000));
+            }
+            
+            // Fetch fresh PR data
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            
+            const labels = pr.labels.map(l => l.name);
+            
+            console.log('='.repeat(60));
+            console.log(`PR #${prNumber} - Approval Validation`);
+            console.log(`Triggered by: ${context.eventName}`);
+            console.log('='.repeat(60));
+            console.log(`Labels: ${labels.join(', ') || 'none'}`);
+            
+            const QTF_CORE_TEAM = ['username1', 'username2', 'username3']; // REPLACE
+            
+            const isFramework = labels.includes('framework');
+            const isTest = labels.includes('tests');
+            
+            console.log(`Framework: ${isFramework}, Test: ${isTest}`);
+            
+            if (!isFramework && !isTest) {
+              console.log('✅ No special requirements');
+              return;
+            }
+            
+            // Get reviews
+            const { data: reviews } = await github.rest.pulls.listReviews({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            
+            const latestReviews = {};
+            reviews.forEach(review => {
+              const user = review.user.login;
+              if (!latestReviews[user] || new Date(review.submitted_at) > new Date(latestReviews[user].submitted_at)) {
+                latestReviews[user] = review;
               }
-              
-              // Count approvals
-              const allApprovals = Object.values(latestReviews).filter(r => r.state === 'APPROVED');
-              const approvedBy = allApprovals.map(r => r.user.login);
-              const totalApprovals = allApprovals.length;
-              const coreApprovals = allApprovals.filter(r => QTF_CORE_TEAM.includes(r.user.login));
-              const coreApprovedBy = coreApprovals.map(r => r.user.login);
-              
-              console.log(`\nCurrent Approvals:`);
-              console.log(`  Total: ${totalApprovals}`);
-              console.log(`  Approved by: ${approvedBy.join(', ') || 'none'}`);
-              console.log(`  Core team approvals: ${coreApprovals.length}`);
-              if (coreApprovals.length > 0) {
-                console.log(`  Core team approved by: ${coreApprovedBy.join(', ')}`);
-              }
-              
-              // Apply approval rules
-              let passed = false;
-              let message = '';
-              
-              if (isTest) {
-                // TEST CHANGES: Require 2 approvals
-                console.log(`\nRule: Test changes require 2 approvals`);
-                
-                if (totalApprovals >= 2) {
-                  passed = true;
-                  message = `✅ **Test change approved**\n\n${totalApprovals} approvals received. Requirements met.`;
-                } else {
-                  passed = false;
-                  message = `❌ **Test change requires 2 approvals**\n\nCurrent: ${totalApprovals}\nNeeded: ${2 - totalApprovals} more`;
-                }
-                
-              } else if (isFramework) {
-                // FRAMEWORK CHANGES: Require 2 approvals with 1 from core
-                console.log(`\nRule: Framework changes require 2 approvals (1 from core)`);
-                console.log(`Core team: ${QTF_CORE_TEAM.join(', ')}`);
-                
-                if (totalApprovals >= 2 && coreApprovals.length >= 1) {
-                  passed = true;
-                  message = `✅ **Framework change approved**\n\n${totalApprovals} approvals (${coreApprovals.length} from core). Requirements met.`;
-                } else if (totalApprovals < 2) {
-                  passed = false;
-                  message = `❌ **Framework change requires 2 approvals**\n\nCurrent: ${totalApprovals}\nNeeded: ${2 - totalApprovals} more ${coreApprovals.length === 0 ? '(at least 1 from core)' : ''}`;
-                } else if (coreApprovals.length < 1) {
-                  passed = false;
-                  message = `❌ **Framework change requires core team approval**\n\n` +
-                           `Approvers: ${approvedBy.join(', ')}\n` +
-                           `Core team: ${QTF_CORE_TEAM.join(', ')}\n\n` +
-                           `Need 1 approval from core team.`;
-                }
-              }
-              
-              console.log(`\n${'='.repeat(60)}`);
-              console.log(message.replace(/\n/g, ' - '));
-              console.log('='.repeat(60));
-              
-              // Post comment only on review events
-              if (context.eventName === 'pull_request_review') {
-                try {
-                  await github.rest.issues.createComment({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    issue_number: prNumber,
-                    body: `🤖 **Approval Validation**\n\n${message}`
-                  });
-                } catch (commentError) {
-                  console.log(`Could not post comment: ${commentError.message}`);
-                }
-              }
-              
-              // Fail if requirements not met
-              if (!passed) {
-                core.setFailed(message.replace(/\*\*/g, '').replace(/\n/g, ' '));
-              } else {
-                console.log('✅ All requirements met!');
-              }
-              
-            } catch (error) {
-              console.error('Error validating approvals:', error);
-              core.setFailed(`Failed to validate approvals: ${error.message}`);
+            });
+            
+            const approvals = Object.values(latestReviews).filter(r => r.state === 'APPROVED');
+            const totalApprovals = approvals.length;
+            const coreApprovals = approvals.filter(r => QTF_CORE_TEAM.includes(r.user.login)).length;
+            
+            console.log(`Approvals: ${totalApprovals} (${coreApprovals} from core)`);
+            
+            let passed = false;
+            let message = '';
+            
+            if (isTest) {
+              passed = totalApprovals >= 2;
+              message = passed 
+                ? `✅ Test: ${totalApprovals} approvals` 
+                : `❌ Test needs 2 approvals (have ${totalApprovals})`;
+            } else if (isFramework) {
+              passed = totalApprovals >= 2 && coreApprovals >= 1;
+              message = passed
+                ? `✅ Framework: ${totalApprovals} approvals (${coreApprovals} from core)`
+                : totalApprovals < 2
+                  ? `❌ Framework needs 2 approvals (have ${totalApprovals})`
+                  : `❌ Framework needs core approval (team: ${QTF_CORE_TEAM.join(', ')})`;
+            }
+            
+            console.log(message);
+            
+            if (!passed) {
+              core.setFailed(message);
             }
