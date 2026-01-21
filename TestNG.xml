@@ -1,9 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE suite SYSTEM "http://testng.org/testng-1.0.dtd">
 <suite name="Demo Suite" parallel="tests" thread-count="100">
-    <test name="AHA Transfer Failover - Shard Instance">
-        <classes>
-            <class name="src.test.java.module1.class1" />
-        </classes>
-    </test>
+    <test name="Free CRM App Test Cases">
+		<classes>
+			<class name="module1.class1"></class>
+			<class name="module1.class3"></class>
+			<class name="module1.ExtentDemo"></class>
+			<class name="module2.class2"></class>
+			<class name="module2.class4"></class>
+			<!-- <class name="com.crm.qa.testcases.ContactsPageTest"></class> -->
+
+		</classes>
+	</test>
 </suite>
