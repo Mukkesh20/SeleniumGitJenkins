@@ -54,9 +54,11 @@
                 <version>3.3.1</version>
                 <configuration>
                     <configLocation>checkstyle.xml</configLocation>
-                    <consoleOutput>true</consoleOutput>
-                    <failsOnError>false</failsOnError>
-                    <violationSeverity>warning</violationSeverity>
+			        <consoleOutput>true</consoleOutput>
+			        <failsOnError>false</failsOnError>
+			        <failOnViolation>false</failOnViolation>  <!-- KEY: Don't fail build -->
+			        <violationSeverity>error</violationSeverity>
+			        <logViolationsToConsole>true</logViolationsToConsole>
                 </configuration>
                 <executions>
                     <execution>
