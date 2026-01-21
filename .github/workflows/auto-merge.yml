@@ -9,10 +9,10 @@ on:
     branches:
       - main
       - develop
-      name: Auto-Merge PR
-  workflow_run:
-    workflows: ["Your Label Workflow Name"]  # Replace with actual workflow name
-    types: [completed]
+  pull_request_review:
+    types: [submitted, dismissed]
+  repository_dispatch:
+    types: [labels-updated]
 
 jobs:
   auto-merge:
@@ -21,6 +21,11 @@ jobs:
       contents: write
       pull-requests: write
     
+    # Only run on review events or when labels change on open PRs
+    if: |
+      github.event_name == 'pull_request_review' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.state == 'open')
+    
     steps:
       - name: Get PR details
         id: pr
@@ -28,16 +33,12 @@ jobs:
         with:
           script: |
             let prNumber;
+            let pr;
             
-            if (context.eventName === 'workflow_run') {
-              // Get PR from workflow_run event
-              const { data: prs } = await github.rest.pulls.list({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                state: 'open',
-                head: `${context.repo.owner}:${context.payload.workflow_run.head_branch}`
-              });
-              prNumber = prs[0]?.number;
+            if (context.eventName === 'repository_dispatch') {
+              // Get PR from dispatch event (you'll need to pass this)
+              console.log('repository_dispatch event - skipping for now');
+              return;
             } else {
               prNumber = context.payload.pull_request.number;
             }
@@ -48,24 +49,31 @@ jobs:
             }
             
             // Get full PR details
-            const { data: pr } = await github.rest.pulls.get({
+            const { data: prData } = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: prNumber
             });
             
+            pr = prData;
+            
             core.setOutput('number', pr.number);
             core.setOutput('mergeable', pr.mergeable);
             core.setOutput('draft', pr.draft);
+            core.setOutput('state', pr.state);
             core.setOutput('labels', pr.labels.map(l => l.name).join(','));
             
             console.log(`PR #${pr.number}`);
+            console.log(`State: ${pr.state}`);
             console.log(`Labels: ${pr.labels.map(l => l.name).join(', ')}`);
             console.log(`Draft: ${pr.draft}`);
             console.log(`Mergeable: ${pr.mergeable}`);
       
       - name: Check if should auto-merge
-        if: steps.pr.outputs.number != '' && steps.pr.outputs.draft == 'false'
+        if: |
+          steps.pr.outputs.number != '' && 
+          steps.pr.outputs.draft == 'false' &&
+          steps.pr.outputs.state == 'open'
         id: check
         uses: actions/github-script@v7
         env:
@@ -74,12 +82,12 @@ jobs:
         with:
           script: |
             const prNumber = parseInt(process.env.PR_NUMBER);
-            const labels = process.env.PR_LABELS.split(',');
+            const labels = process.env.PR_LABELS.split(',').filter(Boolean);
             
             console.log(`Checking PR #${prNumber}`);
-            console.log(`Labels: ${labels.join(', ')}`);
+            console.log(`Labels: ${labels.join(', ') || 'none'}`);
             
-            // Define QTF core team members
+            // Define QTF core team members (replace with actual usernames)
             const qtfCoreTeam = [
               'username1',
               'username2',
@@ -88,11 +96,12 @@ jobs:
             
             // Determine change type from labels
             const isFrameworkChange = labels.includes('framework');
-            const isTestChange = labels.includes('tests');
+            const isTestChange = labels.includes('test');
             
             if (!isFrameworkChange && !isTestChange) {
-              console.log('⏭️  No test/framework label found, skipping auto-merge');
+              console.log('⏭️  No test/framework label found, skipping auto-merge check');
               core.setOutput('should_merge', 'false');
+              core.setOutput('skip_comment', 'true');
               return;
             }
             
@@ -124,37 +133,61 @@ jobs:
             
             let shouldMerge = false;
             let reason = '';
+            let shouldComment = false;
             
             if (isTestChange) {
               // Test changes: auto-merge with any 2 approvals
               if (totalApprovals >= 2) {
                 shouldMerge = true;
-                reason = `✅ Test change with ${totalApprovals} approvals - auto-merging`;
+                shouldComment = true;
+                reason = `✅ Test change approved - ${totalApprovals} approvals received. Auto-merge enabled.`;
+              } else if (totalApprovals === 1) {
+                shouldComment = context.eventName === 'pull_request_review';
+                reason = `⏳ Test change has ${totalApprovals}/2 approvals. One more approval needed for auto-merge.`;
               } else {
-                reason = `⏳ Test change needs 2 approvals (currently: ${totalApprovals})`;
+                shouldComment = false;
+                reason = `⏳ Test change needs 2 approvals for auto-merge.`;
               }
             } else if (isFrameworkChange) {
               // Framework changes: auto-merge with 2 approvals (1 from core team)
               if (totalApprovals >= 2 && coreTeamApprovals.length >= 1) {
                 shouldMerge = true;
-                reason = `✅ Framework change with ${totalApprovals} approvals (${coreTeamApprovals.length} from core team) - auto-merging`;
-              } else if (totalApprovals < 2) {
-                reason = `⏳ Framework change needs 2 approvals (currently: ${totalApprovals})`;
-              } else if (coreTeamApprovals.length < 1) {
-                reason = `⏳ Framework change needs at least 1 core team approval (${qtfCoreTeam.join(', ')})`;
+                shouldComment = true;
+                reason = `✅ Framework change approved - ${totalApprovals} approvals (${coreTeamApprovals.length} from core team). Auto-merge enabled.`;
+              } else if (totalApprovals >= 2 && coreTeamApprovals.length === 0) {
+                shouldComment = context.eventName === 'pull_request_review';
+                reason = `⏳ Framework change has ${totalApprovals} approvals but needs at least 1 from QTF core team (${qtfCoreTeam.join(', ')}) for auto-merge.`;
+              } else if (totalApprovals === 1) {
+                shouldComment = context.eventName === 'pull_request_review';
+                const fromCore = coreTeamApprovals.length > 0 ? ' (1 from core team)' : '';
+                reason = `⏳ Framework change has ${totalApprovals}/2 approvals${fromCore}. Needs ${2 - totalApprovals} more approval(s)${coreTeamApprovals.length === 0 ? ' (at least 1 from core team)' : ''} for auto-merge.`;
+              } else {
+                shouldComment = false;
+                reason = `⏳ Framework change needs 2 approvals (at least 1 from core team) for auto-merge.`;
               }
             }
             
             console.log(reason);
             core.setOutput('should_merge', shouldMerge ? 'true' : 'false');
             core.setOutput('reason', reason);
+            core.setOutput('should_comment', shouldComment ? 'true' : 'false');
+      
+      - name: Post status comment
+        if: steps.check.outputs.should_comment == 'true'
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REASON: ${{ steps.check.outputs.reason }}
+        with:
+          script: |
+            const prNumber = parseInt(process.env.PR_NUMBER);
+            const reason = process.env.REASON;
             
-            // Post comment on PR
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: prNumber,
-              body: reason
+              body: `🤖 **Auto-Merge Status**\n\n${reason}`
             });
       
       - name: Check CI status
@@ -190,17 +223,31 @@ jobs:
               ref: sha
             });
             
+            // Filter out this workflow itself
+            const relevantCheckRuns = checkRuns.check_runs.filter(run => 
+              run.name !== 'auto-merge' && run.name !== 'Auto-Merge PR'
+            );
+            
             const allPassed = 
-              statuses.state === 'success' &&
-              checkRuns.check_runs.every(run => 
+              (statuses.state === 'success' || statuses.statuses.length === 0) &&
+              (relevantCheckRuns.length === 0 || relevantCheckRuns.every(run => 
                 run.status === 'completed' && 
                 (run.conclusion === 'success' || run.conclusion === 'skipped' || run.conclusion === 'neutral')
-              );
+              ));
             
             console.log(`CI Status: ${statuses.state}`);
-            console.log(`Check runs: ${checkRuns.check_runs.map(r => `${r.name}: ${r.conclusion}`).join(', ')}`);
+            console.log(`Status checks: ${statuses.statuses.length}`);
+            console.log(`Check runs (excluding this workflow): ${relevantCheckRuns.length}`);
+            
+            if (relevantCheckRuns.length > 0) {
+              console.log(`Check runs: ${relevantCheckRuns.map(r => `${r.name}: ${r.conclusion}`).join(', ')}`);
+            }
             
             core.setOutput('all_passed', allPassed ? 'true' : 'false');
+            
+            if (!allPassed) {
+              console.log('⏳ Not all CI checks passed yet');
+            }
       
       - name: Enable auto-merge
         if: steps.check.outputs.should_merge == 'true' && steps.ci-status.outputs.all_passed == 'true'
@@ -208,9 +255,15 @@ jobs:
         env:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const prNumber = parseInt(process.env.PR_NUMBER);
+            
+            // Get PR node_id
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
             
             try {
               // Enable auto-merge with squash merge
@@ -231,7 +284,7 @@ jobs:
                   }
                 }
               `, {
-                pullRequestId: context.payload.pull_request.node_id
+                pullRequestId: pr.node_id
               });
               
               console.log(`✅ Auto-merge enabled for PR #${prNumber}`);
@@ -240,77 +293,49 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: prNumber,
-                body: '🤖 Auto-merge enabled. PR will merge automatically once all checks pass.'
+                body: '🎉 **Auto-merge enabled!** PR will merge automatically once all required checks pass.'
               });
             } catch (error) {
               console.error('Failed to enable auto-merge:', error);
               
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber,
-                body: '⚠️ Failed to enable auto-merge. You may need to enable auto-merge in repository settings.'
-              });
-            }
-
-# Required for PR comments
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-
-jobs:
-  check-approvals:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-      
-      - name: Check framework changes
-        id: check-files
-        run: |
-          # Get changed files
-          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
-          
-          # Define framework paths (adjust to your structure)
-          FRAMEWORK_PATTERNS="^src/framework/|^src/core/|/base/"
-          
-          if echo "$CHANGED_FILES" | grep -E "$FRAMEWORK_PATTERNS"; then
-            echo "framework_changed=true" >> $GITHUB_OUTPUT
-            echo "Framework files changed"
-          else
-            echo "framework_changed=false" >> $GITHUB_OUTPUT
-            echo "No framework files changed"
-          fi
-      
-      - name: Validate approvals
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const frameworkChanged = '${{ steps.check-files.outputs.framework_changed }}' === 'true';
-            const qtfCoreTeam = ['user1', 'user2', 'user3']; // Replace with actual usernames
-            
-            const { data: reviews } = await github.rest.pulls.listReviews({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number
-            });
-            
-            const approvals = reviews.filter(r => r.state === 'APPROVED');
-            const qtfCoreApprovals = approvals.filter(r => 
-              qtfCoreTeam.includes(r.user.login)
-            );
-            
-            if (frameworkChanged) {
-              if (approvals.length < 2) {
-                core.setFailed('Framework changes require 2 approvals');
-              }
-              if (qtfCoreApprovals.length < 1) {
-                core.setFailed('Framework changes require at least 1 approval from QTF core team');
-              }
-            } else {
-              if (approvals.length < 1) {
-                core.setFailed('All changes require at least 1 approval');
+              // If auto-merge feature is not available, merge directly
+              if (error.message.includes('auto-merge')) {
+                console.log('Auto-merge feature not available, attempting direct merge...');
+                
+                try {
+                  await github.rest.pulls.merge({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: prNumber,
+                    merge_method: 'squash',
+                    commit_title: pr.title,
+                    commit_message: `Auto-merged: All approval requirements met`
+                  });
+                  
+                  console.log(`✅ PR #${prNumber} merged directly`);
+                  
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: prNumber,
+                    body: '🎉 **PR auto-merged successfully!**'
+                  });
+                } catch (mergeError) {
+                  console.error('Direct merge failed:', mergeError);
+                  
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: prNumber,
+                    body: `⚠️ Auto-merge failed: ${mergeError.message}\n\nPlease merge manually.`
+                  });
+                }
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  body: `⚠️ Failed to enable auto-merge: ${error.message}\n\nYou may need to enable auto-merge in repository settings.`
+                });
               }
             }
