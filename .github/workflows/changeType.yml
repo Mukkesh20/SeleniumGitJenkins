@@ -101,9 +101,9 @@ jobs:
             
             // Define label mappings
             const labelMap = {
-              framework: 'type:framework',
-              tests: 'type:tests',
-              config: 'type:config'
+              framework: 'framework',
+              tests: 'tests',
+              config: 'config'
             };
             
             // Determine which labels to add/remove
