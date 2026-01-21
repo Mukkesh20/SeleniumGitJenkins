@@ -4,7 +4,7 @@ on:
   pull_request_review:
     types: [submitted, dismissed]
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [labeled, unlabeled]
 
 jobs:
   validate-approvals:
@@ -50,27 +50,16 @@ jobs:
             console.log(`PR #${prNumber} - Approval Validation`);
             console.log('='.repeat(60));
             
-            // Determine change type from labels
-            const isFramework = labels.some(l => 
-              l === 'type:framework' || 
-              l === 'framework' ||
-              l.toLowerCase().includes('framework')
-            );
-            
-            const isTest = labels.some(l => 
-              l === 'type:tests' ||
-              l === 'type:test' ||
-              l === 'test' ||
-              l === 'tests' ||
-              l.toLowerCase().includes('test')
-            );
+            // Check for framework or tests labels (exact match)
+            const isFramework = labels.includes('framework');
+            const isTest = labels.includes('tests');
             
             console.log(`\nChange Type:`);
             console.log(`  Framework: ${isFramework}`);
             console.log(`  Test: ${isTest}`);
             console.log(`  Labels: ${labels.join(', ') || 'none'}`);
             
-            // If no relevant label, pass the check
+            // If no relevant label, pass the check (standard review process)
             if (!isFramework && !isTest) {
               console.log(`\n✅ No framework/test label - standard review process applies`);
               return;
@@ -118,10 +107,10 @@ jobs:
               
               if (totalApprovals >= 2) {
                 passed = true;
-                message = `✅ Test change requirement met: ${totalApprovals} approvals`;
+                message = `✅ **Test change approved**\n\n${totalApprovals} approvals received. Requirements met.`;
               } else {
                 passed = false;
-                message = `❌ Test change requires 2 approvals (current: ${totalApprovals})`;
+                message = `❌ **Test change requires 2 approvals**\n\nCurrent: ${totalApprovals}\nNeeded: ${2 - totalApprovals} more approval(s)`;
               }
               
             } else if (isFramework) {
@@ -131,20 +120,21 @@ jobs:
               
               if (totalApprovals >= 2 && coreApprovals.length >= 1) {
                 passed = true;
-                message = `✅ Framework change requirement met: ${totalApprovals} approvals (${coreApprovals.length} from core team)`;
+                message = `✅ **Framework change approved**\n\n${totalApprovals} approvals received (${coreApprovals.length} from core team). Requirements met.`;
               } else if (totalApprovals < 2) {
                 passed = false;
-                message = `❌ Framework change requires 2 approvals (current: ${totalApprovals})`;
+                message = `❌ **Framework change requires 2 approvals**\n\nCurrent: ${totalApprovals}\nNeeded: ${2 - totalApprovals} more approval(s) ${coreApprovals.length === 0 ? '(at least 1 must be from core team)' : ''}`;
               } else if (coreApprovals.length < 1) {
                 passed = false;
-                message = `❌ Framework change requires at least 1 core team approval\n\n` +
+                message = `❌ **Framework change requires core team approval**\n\n` +
                          `Current approvers: ${approvedBy.join(', ')}\n` +
-                         `Core team members: ${QTF_CORE_TEAM.join(', ')}`;
+                         `Core team members: ${QTF_CORE_TEAM.join(', ')}\n\n` +
+                         `Need at least 1 approval from QTF core team.`;
               }
             }
             
             console.log(`\n${'='.repeat(60)}`);
-            console.log(message);
+            console.log(message.replace(/\n/g, '\n'));
             console.log('='.repeat(60));
             
             // Post comment on PR
@@ -152,11 +142,10 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: prNumber,
-              body: `🤖 **Approval Validation**\n\n${message}\n\n` +
-                    `*Check will ${passed ? 'pass ✅' : 'fail ❌'} - ${passed ? 'merge allowed' : 'merge blocked'}*`
+              body: `🤖 **Approval Validation**\n\n${message}`
             });
             
             // CRITICAL: Fail the workflow if requirements not met
             if (!passed) {
-              core.setFailed(message);
+              core.setFailed(message.replace(/\*\*/g, '').replace(/\n/g, ' '));
             }
