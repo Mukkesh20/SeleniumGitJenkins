@@ -9,11 +9,7 @@
 
 	<test name="Free CRM App Test Cases">
 		<classes>
-			<class name="module1.class1"></class>
-			<class name="module1.class3"></class>
-			<class name="module1.ExtentDemo"></class>
-			<class name="module2.class2"></class>
-			<class name="module2.class4"></class>
+			<class name="module1.class2"></class>
 			<!-- <class name="com.crm.qa.testcases.ContactsPageTest"></class> -->
 
 		</classes>
