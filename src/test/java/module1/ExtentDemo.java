@@ -33,8 +33,8 @@ public class ExtentDemo {
 		System.setProperty("webdriver.chrome.driver", "/Users/gajendrasingh/Downloads/chromedriver");
 		WebDriver driver = new ChromeDriver();
 		driver.get("https://www.google.co.in");
-		System.out.prin(driver.getTitle());
-		if(driver.getTitle().equals("Google"))
+		String title = driver.getTitle();
+		if(title.equals("Google"))
 		{
 			test.log(LogStatus.PASS, "Navigated to the specified URL");
 		}
