@@ -27,7 +27,7 @@ public class class4 {
 	@Step("Step")
 
 	public void test1() {
-		System.out.println("test41 executed");
+		System.out.println("test41 ee2e2we xecuted");
 	}
 	
 	@Test 
