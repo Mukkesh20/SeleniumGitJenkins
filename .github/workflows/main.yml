@@ -155,7 +155,7 @@ jobs:
 
           # CONFIRM: job path + parameter names. Triggering against the integration branch.
           LOC=$(curl -sf -K "$CFG" -H "Jenkins-Crumb:$CRUMB" -D - -o /dev/null \
-                  -X POST "$JENKINS_URL/job/${{ matrix.job }}/buildWithParameters?branch=$INTEGRATION_BRANCH" \
+                  -X POST "$JENKINS_URL/job/${{ matrix.job }}/buildWithParameters?branchName=$INTEGRATION_BRANCH" \
                 | awk 'BEGIN{IGNORECASE=1}/^location:/{print $2}' | tr -d '\r')
           echo "Queued: $LOC"
 
