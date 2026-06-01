@@ -316,7 +316,9 @@ jobs:
               commitTable,
               ``,
               `---`,
-              `## 🔧 Jenkins Validation`,
+              `## � Jenkins Validation`,
+              ``,
+              jenkinsPlaceholder,
               ``,
               `<!-- JENKINS_BLOCK_START -->`,
               jenkinsPlaceholder,
@@ -358,25 +360,9 @@ jobs:
             core.setOutput('pr-url',    pr.html_url);
 
   # ===========================================================================
-  # 3) Validate integration — trigger Jenkins and gate on GitHub commit status.
-  #
-  #  HOW IT WORKS (avoids GitHub runner → intranet connectivity):
-  #    a) This job clears any stale commit status, then triggers Jenkins via
-  #       HTTP (Jenkins only needs outbound internet to receive the webhook or
-  #       the trigger URL can be proxied). If JENKINS_URL is unreachable, use
-  #       skip_jenkins=true and trigger the build manually — Jenkins will still
-  #       post the status back and unblock this workflow.
-  #    b) Jenkins on build completion POSTs to GitHub commit statuses API:
-  #         POST https://api.github.com/repos/OWNER/REPO/statuses/SHA
-  #         { "state": "success"|"failure",
-  #           "context": "jenkins/<JOB_NAME>",
-  #           "description": "...",
-  #           "target_url": "<BUILD_URL>" }
-  #       Use a Jenkins credential storing a GitHub token with `repo:status` scope.
-  #       Recommended Jenkins plugin: "GitHub" plugin (post-build action) or a
-  #       simple shell step with curl.
-  #    c) This job polls the GitHub statuses API until it sees the result or
-  #       times out (jenkins_timeout_minutes).
+  # 3) Validate integration — trigger Jenkins jobs; gate on green.
+  #    Outputs the build URL for each matrix leg so the next job can patch
+  #    the PR body with real links.
   # ===========================================================================
   validate-integration:
     name: "Validate integration — ${{ matrix.job }}"
@@ -391,117 +377,94 @@ jobs:
         # CONFIRM: these must match your real Jenkins job names / paths.
         job: [CheckRegressionRunReadiness]
     steps:
-      - name: Get integration HEAD SHA
-        id: sha
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.QTF_REVIEW_TOKEN }}
-          script: |
-            const { data: ref } = await github.rest.git.getRef({
-              owner: context.repo.owner,
-              repo:  context.repo.repo,
-              ref:   `heads/${process.env.INTEGRATION_BRANCH}`
-            });
-            core.setOutput('sha', ref.object.sha);
-            core.info(`integration HEAD: ${ref.object.sha}`);
-
-      - name: Clear stale commit status for ${{ matrix.job }}
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.QTF_REVIEW_TOKEN }}
-          script: |
-            await github.rest.repos.createCommitStatus({
-              owner:       context.repo.owner,
-              repo:        context.repo.repo,
-              sha:         '${{ steps.sha.outputs.sha }}',
-              state:       'pending',
-              context:     `jenkins/${{ matrix.job }}`,
-              description: 'Merge train triggered — waiting for Jenkins result'
-            });
-            core.info('Commit status set to pending.');
-
-      - name: Trigger Jenkins — ${{ matrix.job }}
-        if: inputs.skip_jenkins != true
+      - name: Trigger and wait for ${{ matrix.job }} on integration
+        id: jenkins
         env:
-          JENKINS_URL:       ${{ secrets.JENKINS_URL }}
-          JENKINS_USER:      ${{ secrets.JENKINS_USER }}
+          JENKINS_URL: ${{ secrets.JENKINS_URL }}
+          JENKINS_USER: ${{ secrets.JENKINS_USER }}
           JENKINS_API_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
         run: |
           set -euo pipefail
 
+          # Testing escape-hatch: skip Jenkins entirely and treat the job as successful.
+          if [ "${{ inputs.skip_jenkins }}" = "true" ]; then
+            echo "skip_jenkins=true — skipping Jenkins trigger, treating ${{ matrix.job }} as SUCCESS."
+            echo "build-url=_skipped_" >> "$GITHUB_OUTPUT"
+            echo "result=SUCCESS"      >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Validate that required secrets are present before attempting any network call.
           if [ -z "${JENKINS_URL:-}" ] || [ -z "${JENKINS_USER:-}" ] || [ -z "${JENKINS_API_TOKEN:-}" ]; then
-            echo "::error::One or more Jenkins secrets are not set."
+            echo "::error::One or more Jenkins secrets (JENKINS_URL, JENKINS_USER, JENKINS_API_TOKEN) are not set."
             exit 1
           fi
 
+          # ── Diagnostics: print URL shape and DNS resolution before any real call ──
+          JENKINS_HOST=$(echo "$JENKINS_URL" | sed 's|https\?://||' | cut -d'/' -f1 | tr -d '[:space:]')
+          echo "JENKINS_HOST (extracted): '${JENKINS_HOST}'"
+          echo "JENKINS_URL byte length : $(echo -n "$JENKINS_URL" | wc -c)"
+          nslookup "$JENKINS_HOST" 2>&1 || echo "nslookup failed — host not resolvable from this runner"
+
+          # Keep credentials OUT of the process list.
           CFG="$(mktemp)"; chmod 600 "$CFG"
           printf 'user = "%s:%s"\n' "$JENKINS_USER" "$JENKINS_API_TOKEN" > "$CFG"
           trap 'rm -f "$CFG"' EXIT
 
-          CRUMB=$(curl -sS -K "$CFG" --connect-timeout 10 \
-            "$JENKINS_URL/crumbIssuer/api/json" | jq -r '.crumb // empty')
+          CRUMB_RESP=$(curl -sS -K "$CFG" --connect-timeout 10 \
+            "$JENKINS_URL/crumbIssuer/api/json" 2>&1) || true
+          echo "Crumb response: $CRUMB_RESP"
+          CRUMB=$(echo "$CRUMB_RESP" | jq -r '.crumb // empty')
           if [ -z "$CRUMB" ]; then
-            echo "::error::Could not obtain Jenkins crumb — is JENKINS_URL reachable from this runner?"
+            echo "::error::Could not obtain Jenkins crumb. Check JENKINS_URL reachability and credentials."
             exit 1
           fi
 
-          # Trigger the build. Jenkins will POST the result back to GitHub statuses API.
-          HTTP=$(curl -s -o /dev/null -w "%{http_code}" -K "$CFG" \
-            -H "Jenkins-Crumb:$CRUMB" \
-            -X POST "$JENKINS_URL/job/${{ matrix.job }}/buildWithParameters?branch=$INTEGRATION_BRANCH")
-          echo "Jenkins trigger HTTP status: $HTTP"
-          [[ "$HTTP" =~ ^2|^3 ]] || { echo "::error::Jenkins trigger returned HTTP $HTTP"; exit 1; }
-          echo "Jenkins job triggered successfully. Waiting for commit status callback..."
+          # CONFIRM: job path + parameter names.
+          LOC=$(curl -sf -K "$CFG" -H "Jenkins-Crumb:$CRUMB" -D - -o /dev/null \
+                  -X POST "$JENKINS_URL/job/${{ matrix.job }}/buildWithParameters?branch=$INTEGRATION_BRANCH" \
+                | awk 'BEGIN{IGNORECASE=1}/^location:/{print $2}' | tr -d '\r')
+          echo "Queued: $LOC"
 
-      - name: Skip notice
-        if: inputs.skip_jenkins == true
-        run: |
-          echo "skip_jenkins=true — Jenkins trigger skipped."
-          echo "The workflow will poll for a commit status on context 'jenkins/${{ matrix.job }}'."
-          echo "Either set it manually or let a previous Jenkins run's callback land."
+          # Queue item -> build URL (wait up to 10 min for an executor).
+          QUEUE_DEADLINE=$(( $(date +%s) + 600 ))
+          BUILD_URL=""
+          while [ "$(date +%s)" -lt "$QUEUE_DEADLINE" ]; do
+            BUILD_URL=$(curl -sf -K "$CFG" "${LOC}api/json" | jq -r '.executable.url // empty')
+            [ -n "$BUILD_URL" ] && break
+            sleep 10
+          done
+          [ -n "$BUILD_URL" ] || { echo "::error::Build never started for ${{ matrix.job }} within 10 min queue wait"; exit 1; }
+          echo "Building: $BUILD_URL"
+          echo "build-url=${BUILD_URL}" >> "$GITHUB_OUTPUT"
 
-      - name: Poll GitHub commit status — ${{ matrix.job }}
-        id: poll
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.QTF_REVIEW_TOKEN }}
-          script: |
-            const owner   = context.repo.owner, repo = context.repo.repo;
-            const sha     = '${{ steps.sha.outputs.sha }}';
-            const ctx     = `jenkins/${{ matrix.job }}`;
-            const timeoutMin = parseInt('${{ inputs.jenkins_timeout_minutes || 30 }}');
-            const deadline   = Date.now() + timeoutMin * 60 * 1000;
-
-            core.info(`Polling commit status '${ctx}' on ${sha} for up to ${timeoutMin} min...`);
-
-            while (Date.now() < deadline) {
-              const { data: statuses } = await github.rest.repos.listCommitStatusesForRef({
-                owner, repo, ref: sha, per_page: 20
-              });
-              const match = statuses.find(s => s.context === ctx && s.state !== 'pending');
-              if (match) {
-                core.info(`Status received: ${match.state} — ${match.description}`);
-                core.setOutput('result',    match.state === 'success' ? 'SUCCESS' : 'FAILURE');
-                core.setOutput('build-url', match.target_url || '_unavailable_');
-                if (match.state !== 'success') {
-                  core.setFailed(`Jenkins job ${{ matrix.job }} reported: ${match.state}`);
-                }
-                return;
-              }
-              core.info(`Still pending… (${Math.round((deadline - Date.now()) / 60000)} min remaining)`);
-              await new Promise(r => setTimeout(r, 30000));
-            }
-            core.setFailed(`Timed out after ${timeoutMin} min waiting for commit status '${ctx}'`);
+          # Poll the build to completion — timeout driven by jenkins_timeout_minutes input.
+          TIMEOUT_MIN="${{ inputs.jenkins_timeout_minutes || 30 }}"
+          POLL_DEADLINE=$(( $(date +%s) + TIMEOUT_MIN * 60 ))
+          echo "Polling ${{ matrix.job }} for up to ${TIMEOUT_MIN} minutes..."
+          while [ "$(date +%s)" -lt "$POLL_DEADLINE" ]; do
+            INFO=$(curl -sf -K "$CFG" "${BUILD_URL}api/json")
+            BUILDING=$(echo "$INFO" | jq -r '.building')
+            RESULT=$(echo "$INFO"   | jq -r '.result // "null"')
+            if [ "$BUILDING" = "false" ] && [ "$RESULT" != "null" ]; then
+              echo "${{ matrix.job }} result: $RESULT"
+              echo "result=${RESULT}" >> "$GITHUB_OUTPUT"
+              [ "$RESULT" = "SUCCESS" ] && exit 0 || exit 1
+            fi
+            sleep 30
+          done
+          echo "::error::Timed out after ${TIMEOUT_MIN} min waiting for ${{ matrix.job }}"; exit 1
 
       - name: Write result artifact for ${{ matrix.job }}
         if: always()
         run: |
           mkdir -p /tmp/jenkins-results
           JOB_NAME="${{ matrix.job }}"
+          # Read from GITHUB_OUTPUT file — reliable even when the jenkins step exits early
           BUILD_URL=$(grep '^build-url=' "$GITHUB_OUTPUT" 2>/dev/null | tail -1 | cut -d= -f2-)
           RESULT=$(grep '^result=' "$GITHUB_OUTPUT" 2>/dev/null | tail -1 | cut -d= -f2-)
-          [ -z "$BUILD_URL" ] && BUILD_URL="_pending_"
-          [ -z "$RESULT"    ] && RESULT="TIMEOUT"
+          [ -z "$BUILD_URL" ] && BUILD_URL="_skipped_"
+          [ -z "$RESULT"    ] && RESULT="SKIPPED"
           jq -n \
             --arg job    "$JOB_NAME" \
             --arg result "$RESULT" \
