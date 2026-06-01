@@ -45,7 +45,7 @@ name: Master Merge Workflow
 on:
   schedule:
     # CONFIRM: cron is always UTC. Tuesday 04:00 UTC ~= 09:30 IST.
-    - cron: '26 9 * * 1'
+    - cron: '43 9 * * 1'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -66,7 +66,7 @@ concurrency:
 
 env:
   INTEGRATION_BRANCH: integration
-  MASTER_BRANCH: main
+  MASTER_BRANCH: master
   QTF_TEAM: qtf-team
 
 jobs:
@@ -125,7 +125,7 @@ jobs:
       fail-fast: false
       matrix:
         # CONFIRM: these must match your real Jenkins job names / paths.
-        job: [CheckRegressionReadiness, UpdateQeopsTable, AHATransferTestExecution]
+        job: [CheckRegressionReadiness]
     steps:
       - name: Trigger and wait for ${{ matrix.job }} on integration
         env:
