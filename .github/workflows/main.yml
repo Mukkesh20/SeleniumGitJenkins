@@ -238,11 +238,18 @@ jobs:
               owner, repo, basehead: `${base}...${head}`
             });
 
-            // Extract PR numbers from merge commit messages (format: "... (#NNN)")
+            // Extract PR numbers from merge commit messages — handles both common formats:
+            //   "Merge pull request #NNN from ..."
+            //   "Some title (#NNN)"
             const prNums = new Set();
             for (const c of cmp.commits) {
-              const m = c.commit.message.match(/\(#(\d+)\)/g);
-              if (m) m.forEach(s => prNums.add(parseInt(s.replace(/\D/g, ''))));
+              const msg = c.commit.message;
+              // Format 1: GitHub default merge commit "Merge pull request #NNN"
+              const m1 = msg.match(/Merge pull request #(\d+)/);
+              if (m1) prNums.add(parseInt(m1[1]));
+              // Format 2: squash/title suffix "(#NNN)"
+              const m2 = msg.match(/\(#(\d+)\)/g);
+              if (m2) m2.forEach(s => prNums.add(parseInt(s.replace(/\D/g, ''))));
             }
 
             // Fetch PR details for each discovered PR number
@@ -260,13 +267,31 @@ jobs:
               }
             }
 
+            // Build commit table (always shown — useful when commits are pushed directly)
+            const commitRows = cmp.commits.map(c => {
+              const sha   = c.sha.substring(0, 7);
+              const url   = c.html_url;
+              const msg   = c.commit.message.split('\n')[0].replace(/\|/g, '\\|');
+              const author = c.author ? `@${c.author.login}` : c.commit.author.name;
+              const date  = c.commit.author.date.slice(0, 10);
+              return `| [\`${sha}\`](${url}) | ${msg} | ${author} | ${date} |`;
+            });
+
             const prTable = prRows.length
               ? [
                   `| PR | Title | Author | Merged | Labels |`,
                   `|----|-------|--------|--------|--------|`,
                   ...prRows
                 ].join('\n')
-              : '_No constituent PRs detected — commits may have been pushed directly._';
+              : '_No constituent PRs detected — see commit list below._';
+
+            const commitTable = commitRows.length
+              ? [
+                  `| Commit | Message | Author | Date |`,
+                  `|--------|---------|--------|------|`,
+                  ...commitRows
+                ].join('\n')
+              : '_No commits found._';
 
             // ── Jenkins placeholder table (will be updated by update-pr-jenkins job) ──
             const jenkinsPlaceholder = [
@@ -286,7 +311,12 @@ jobs:
               prTable,
               ``,
               `---`,
-              `## 🔧 Jenkins Validation`,
+              `## � Commits (${commitRows.length} commit${commitRows.length !== 1 ? 's' : ''})`,
+              ``,
+              commitTable,
+              ``,
+              `---`,
+              `## �🔧 Jenkins Validation`,
               ``,
               jenkinsPlaceholder,
               ``,
