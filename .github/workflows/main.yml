@@ -198,8 +198,12 @@ jobs:
             });
             if (existing.length) {
               pr = existing[0];
-              core.info(`Reusing promotion PR #${pr.number}`);
-              await github.rest.pulls.update({ owner, repo, pull_number: pr.number, body });
+              core.info(`Existing promotion PR #${pr.number} found — updating title and description with latest details.`);
+              await github.rest.pulls.update({
+                owner, repo, pull_number: pr.number,
+                title: `Weekly merge train: ${head} -> ${base} (${today})`,
+                body
+              });
             } else {
               const { data: created } = await github.rest.pulls.create({
                 owner, repo, base, head,
@@ -343,6 +347,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [preflight, raise-pr, validate-integration]
     if: |
+      failure() &&
       needs.preflight.outputs.should-run == 'true' &&
       needs.validate-integration.result == 'failure'
     steps:
