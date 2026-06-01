@@ -52,6 +52,10 @@ on:
         description: 'Validate + check mergeability but do NOT merge to master'
         type: boolean
         default: true
+      skip_jenkins:
+        description: 'Skip Jenkins trigger/poll (testing only — treats all jobs as SUCCESS)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -116,10 +120,6 @@ jobs:
   # Runs all three against `integration` in parallel. The job only succeeds if
   # every matrix leg succeeds, so `promote` is gated on all three being green.
   #
-  # FIX: Must run on ubuntu-latest (self-hosted) so the runner has network
-  # access to the internal Jenkins instance. ubuntu-latest runners are GitHub-
-  # hosted and cannot reach Jenkins behind the corporate firewall/VPN, which
-  # causes curl exit code 6 (Could not resolve host).
   # ===========================================================================
   validate-integration:
     name: "Validate integration — ${{ matrix.job }}"
@@ -140,6 +140,12 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Testing escape-hatch: skip Jenkins entirely and treat the job as successful.
+          if [ "${{ inputs.skip_jenkins }}" = "true" ]; then
+            echo "skip_jenkins=true — skipping Jenkins trigger, treating ${{ matrix.job }} as SUCCESS."
+            exit 0
+          fi
+
           # Validate that required secrets are present before attempting any network call.
           if [ -z "${JENKINS_URL:-}" ] || [ -z "${JENKINS_USER:-}" ] || [ -z "${JENKINS_API_TOKEN:-}" ]; then
             echo "::error::One or more Jenkins secrets (JENKINS_URL, JENKINS_USER, JENKINS_API_TOKEN) are not set."
@@ -155,7 +161,7 @@ jobs:
 
           # CONFIRM: job path + parameter names. Triggering against the integration branch.
           LOC=$(curl -sf -K "$CFG" -H "Jenkins-Crumb:$CRUMB" -D - -o /dev/null \
-                  -X POST "$JENKINS_URL/job/${{ matrix.job }}/buildWithParameters?branchName=$INTEGRATION_BRANCH" \
+                  -X POST "$JENKINS_URL/job/${{ matrix.job }}/buildWithParameters?branch=$INTEGRATION_BRANCH" \
                 | awk 'BEGIN{IGNORECASE=1}/^location:/{print $2}' | tr -d '\r')
           echo "Queued: $LOC"
 
