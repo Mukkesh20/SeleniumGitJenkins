@@ -198,9 +198,12 @@ jobs:
                 }
               }]
             }')
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+          RESP_BODY=$(mktemp)
+          HTTP_STATUS=$(curl -s -o "$RESP_BODY" -w "%{http_code}" \
             -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$TEAMS_WEBHOOK_URL")
           echo "Teams HTTP status: $HTTP_STATUS"
+          echo "Teams response body: $(cat "$RESP_BODY")"
+          rm -f "$RESP_BODY"
           [[ "$HTTP_STATUS" =~ ^2 ]] || echo "::warning::Teams notification returned HTTP $HTTP_STATUS"
 
   # ===========================================================================
@@ -599,9 +602,12 @@ jobs:
                 }
               }]
             }')
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+          RESP_BODY=$(mktemp)
+          HTTP_STATUS=$(curl -s -o "$RESP_BODY" -w "%{http_code}" \
             -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$TEAMS_WEBHOOK_URL")
           echo "Teams HTTP status: $HTTP_STATUS"
+          echo "Teams response body: $(cat "$RESP_BODY")"
+          rm -f "$RESP_BODY"
           [[ "$HTTP_STATUS" =~ ^2 ]] || echo "::warning::Teams notification returned HTTP $HTTP_STATUS"
           echo "Teams failure notification sent."
 
@@ -725,9 +731,12 @@ jobs:
                 }
               }]
             }')
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+          RESP_BODY=$(mktemp)
+          HTTP_STATUS=$(curl -s -o "$RESP_BODY" -w "%{http_code}" \
             -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$TEAMS_WEBHOOK_URL")
           echo "Teams HTTP status: $HTTP_STATUS"
+          echo "Teams response body: $(cat "$RESP_BODY")"
+          rm -f "$RESP_BODY"
           [[ "$HTTP_STATUS" =~ ^2 ]] || echo "::warning::Teams notification returned HTTP $HTTP_STATUS"
 
   # ===========================================================================
@@ -876,9 +885,12 @@ jobs:
                 }
               }]
             }')
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+          RESP_BODY=$(mktemp)
+          HTTP_STATUS=$(curl -s -o "$RESP_BODY" -w "%{http_code}" \
             -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$TEAMS_WEBHOOK_URL")
           echo "Teams HTTP status: $HTTP_STATUS"
+          echo "Teams response body: $(cat "$RESP_BODY")"
+          rm -f "$RESP_BODY"
           [[ "$HTTP_STATUS" =~ ^2 ]] || echo "::warning::Teams notification returned HTTP $HTTP_STATUS"
           echo "Teams success notification sent."
 
