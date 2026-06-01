@@ -4,10 +4,10 @@
 # The weekly integration -> master promotion train.
 #
 # SCOPE
-#   This workflow ONLY handles the scheduled Tuesday promotion of `integration`
+#   This workflow ONLY handles the scheduled Tuesday promotion of `integration` 
 #   into `master`. It is the "Master Merge Workflow" boundary from the flow
 #   diagram. Everything upstream of it — PR classification, Argus review, the
-#   checklist/QTF gate, and the per-PR auto-merge onto `integration`
+#   checklist/QTF gate, and the per-PR auto-merge onto `integration` 
 #   (eligible -> automated, ineligible -> manual) — is already handled by the
 #   PR Change Detector / PR Auto-Merge / Argus workflows.
 #
@@ -16,7 +16,7 @@
 #   this Tuesday schedule.
 #
 # WHERE THIS LIVES
-#   This file must sit on the DEFAULT branch (`master`) so the `schedule:`
+#   This file must sit on the DEFAULT branch (`master`) so the `schedule:` 
 #   trigger fires. The other QTF workflows live on `integration` /
 #   `gs_gitActionWorkflow`, which is exactly why schedule/check_suite events
 #   can't run from them.
@@ -92,7 +92,7 @@ jobs:
             const head = process.env.INTEGRATION_BRANCH;
 
             const { data: cmp } = await github.rest.repos.compareCommitsWithBasehead({
-              owner, repo, basehead: `${base}...${head}`
+              owner, repo, basehead: `${base}...${head}` 
             });
             core.info(`integration is ahead of master by ${cmp.ahead_by}, behind by ${cmp.behind_by}`);
             core.setOutput('ahead-by', String(cmp.ahead_by));
@@ -115,10 +115,15 @@ jobs:
   # ===========================================================================
   # Runs all three against `integration` in parallel. The job only succeeds if
   # every matrix leg succeeds, so `promote` is gated on all three being green.
+  #
+  # FIX: Must run on 'utility-argus' (self-hosted) so the runner has network
+  # access to the internal Jenkins instance. ubuntu-latest runners are GitHub-
+  # hosted and cannot reach Jenkins behind the corporate firewall/VPN, which
+  # causes curl exit code 6 (Could not resolve host).
   # ===========================================================================
   validate-integration:
     name: "Validate integration — ${{ matrix.job }}"
-    runs-on: ubuntu-latest
+    runs-on: 'utility-argus'
     needs: preflight
     if: needs.preflight.outputs.should-run == 'true'
     strategy:
@@ -134,6 +139,12 @@ jobs:
           JENKINS_API_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
         run: |
           set -euo pipefail
+
+          # Validate that required secrets are present before attempting any network call.
+          if [ -z "${JENKINS_URL:-}" ] || [ -z "${JENKINS_USER:-}" ] || [ -z "${JENKINS_API_TOKEN:-}" ]; then
+            echo "::error::One or more Jenkins secrets (JENKINS_URL, JENKINS_USER, JENKINS_API_TOKEN) are not set."
+            exit 1
+          fi
 
           # Keep credentials OUT of the process list (no --user on the command line).
           CFG="$(mktemp)"; chmod 600 "$CFG"
@@ -247,7 +258,7 @@ jobs:
             // Find an existing open promotion PR, or create one.
             let pr;
             const { data: existing } = await github.rest.pulls.list({
-              owner, repo, state: 'open', base, head: `${owner}:${head}`
+              owner, repo, state: 'open', base, head: `${owner}:${head}` 
             });
             if (existing.length) {
               pr = existing[0];
@@ -279,7 +290,7 @@ jobs:
                 body: `### ⛔ Merge train halted — integration is not mergeable to master\n\n` +
                       `\`${head}\` cannot be merged cleanly into \`${base}\` (an emergency merge likely diverged master). ` +
                       `Conflicts are resolved manually — the train does not auto-resolve.\n\n` +
-                      `@${owner}/${qtf} please sync and resolve.`
+                      `@${owner}/${qtf} please sync and resolve.` 
               });
               try {
                 await github.rest.pulls.requestReviewers({
@@ -299,13 +310,13 @@ jobs:
             try {
               const { data: res } = await github.rest.pulls.merge({
                 owner, repo, pull_number: pr.number, merge_method: 'merge',
-                commit_title: `Weekly merge train: ${head} -> ${base} (#${pr.number})`
+                commit_title: `Weekly merge train: ${head} -> ${base} (#${pr.number})` 
               });
               core.notice(`Promoted to ${base}. Merge SHA ${res.sha.substring(0, 7)}.`);
             } catch (e) {
               await github.rest.issues.createComment({
                 owner, repo, issue_number: pr.number,
-                body: `### ⚠️ Merge train — promotion merge failed\n\n> ${e.message}\n\n@${owner}/${qtf} please investigate.`
+                body: `### ⚠️ Merge train — promotion merge failed\n\n> ${e.message}\n\n@${owner}/${qtf} please investigate.` 
               });
               core.setFailed(`Merge failed: ${e.message}`);
             }
