@@ -3,39 +3,23 @@
 # =============================================================================
 # The weekly integration -> master promotion train.
 #
-# SCOPE
-#   This workflow ONLY handles the scheduled Tuesday promotion of `integration` 
-#   into `master`. It is the "Master Merge Workflow" boundary from the flow
-#   diagram. Everything upstream of it — PR classification, Argus review, the
-#   checklist/QTF gate, and the per-PR auto-merge onto `integration` 
-#   (eligible -> automated, ineligible -> manual) — is already handled by the
-#   PR Change Detector / PR Auto-Merge / Argus workflows.
-#
-#   Emergency PRs are NOT in scope here. They target `master` directly and are
-#   merged on demand by the per-PR review/merge flow — they do not wait for
-#   this Tuesday schedule.
-#
-# WHERE THIS LIVES
-#   This file must sit on the DEFAULT branch (`master`) so the `schedule:` 
-#   trigger fires. The other QTF workflows live on `integration` /
-#   `gs_gitActionWorkflow`, which is exactly why schedule/check_suite events
-#   can't run from them.
-#
 # FLOW
-#   preflight             -> is integration ahead of master? (anything to promote?)
-#   validate-integration  -> run the 3 post-merge jobs on `integration`; gate on green
-#   promote               -> raise integration->master PR; if mergeable, merge;
-#                            else HALT + alert QTF (no auto-resolve)
-#   report                -> always: summarise the run
-#
-# Master re-validation after promotion is intentionally omitted to match the
-# agreed flow: integration is validated *before* promotion, so `master` only
-# ever receives an already-green integration. To add it, see the commented
-# `validate-master` stub at the bottom.
+#   1. preflight           — is integration ahead of master?
+#   2. raise-pr            — create/find promotion PR; populate body with all
+#                            constituent PRs merged into integration since last
+#                            master promotion + Jenkins links (pending at this point)
+#   3. validate-integration — trigger Jenkins jobs on integration; gate on green;
+#                            outputs the actual build URLs
+#   4. update-pr-jenkins   — patch PR body with real Jenkins run URLs + results
+#   5. alert-on-failure    — Teams notification + tracking issue on any failure
+#   6. promote             — merge the promotion PR to master
+#   7. report              — final summary as PR comment + step summary +
+#                            Teams success notification
 #
 # CONFIG YOU MUST CONFIRM (search for "CONFIRM")
 #   - Jenkins secrets: JENKINS_URL, JENKINS_USER, JENKINS_API_TOKEN
-#   - The exact Jenkins job paths + parameter names for the 3 post-merge jobs
+#   - Teams webhook secret: TEAMS_WEBHOOK_URL
+#   - The exact Jenkins job paths + parameter names for the post-merge jobs
 #   - The cron slot (currently Tuesday 04:00 UTC ~= 09:30 IST)
 #   - Merge method (currently 'merge'; switch to 'squash' if you prefer)
 # =============================================================================
@@ -96,10 +80,10 @@ jobs:
             const head = process.env.INTEGRATION_BRANCH;
 
             const { data: cmp } = await github.rest.repos.compareCommitsWithBasehead({
-              owner, repo, basehead: `${base}...${head}` 
+              owner, repo, basehead: `${base}...${head}`
             });
-            core.info(`integration is ahead of master by ${cmp.ahead_by}, behind by ${cmp.behind_by}`);
-            core.setOutput('ahead-by', String(cmp.ahead_by));
+            core.info(`integration ahead by ${cmp.ahead_by}, behind by ${cmp.behind_by}`);
+            core.setOutput('ahead-by',  String(cmp.ahead_by));
             core.setOutput('behind-by', String(cmp.behind_by));
 
             if (cmp.ahead_by === 0) {
@@ -107,32 +91,149 @@ jobs:
               core.setOutput('should-run', 'false');
               return;
             }
-            // If master is ahead of integration, an emergency merge likely diverged it.
-            // The promote job will catch the actual conflict; this is an early heads-up.
             if (cmp.behind_by > 0) {
-              core.warning(`master is ahead of integration by ${cmp.behind_by} (likely an emergency merge) — the promotion PR may conflict.`);
+              core.warning(`master is ahead of integration by ${cmp.behind_by} — promotion PR may conflict.`);
             }
             core.setOutput('should-run', 'true');
 
   # ===========================================================================
-  # 2) Validate integration — the three post-merge jobs (the gate)
+  # 2) Raise PR — create/find the promotion PR and populate its description
+  #    with all constituent PRs + placeholder Jenkins rows BEFORE Jenkins runs.
   # ===========================================================================
-  # Runs all three against `integration` in parallel. The job only succeeds if
-  # every matrix leg succeeds, so `promote` is gated on all three being green.
-  #
+  raise-pr:
+    name: "Raise promotion PR"
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: needs.preflight.outputs.should-run == 'true'
+    outputs:
+      pr-number: ${{ steps.create.outputs.pr-number }}
+      pr-url:    ${{ steps.create.outputs.pr-url }}
+    steps:
+      - name: Create or find promotion PR and populate description
+        id: create
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.QTF_REVIEW_TOKEN }}
+          script: |
+            const owner = context.repo.owner, repo = context.repo.repo;
+            const base  = process.env.MASTER_BRANCH;
+            const head  = process.env.INTEGRATION_BRANCH;
+            const today = new Date().toISOString().slice(0, 10);
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            // ── Collect all PRs merged into integration since last master promotion ──
+            const { data: cmp } = await github.rest.repos.compareCommitsWithBasehead({
+              owner, repo, basehead: `${base}...${head}`
+            });
+
+            // Extract PR numbers from merge commit messages (format: "... (#NNN)")
+            const prNums = new Set();
+            for (const c of cmp.commits) {
+              const m = c.commit.message.match(/\(#(\d+)\)/g);
+              if (m) m.forEach(s => prNums.add(parseInt(s.replace(/\D/g, ''))));
+            }
+
+            // Fetch PR details for each discovered PR number
+            const prRows = [];
+            for (const num of [...prNums].sort((a,b) => a-b)) {
+              try {
+                const { data: p } = await github.rest.pulls.get({ owner, repo, pull_number: num });
+                const labels = p.labels.map(l => `\`${l.name}\``).join(' ');
+                const mergedAt = p.merged_at ? p.merged_at.slice(0,10) : '_open_';
+                prRows.push(
+                  `| [#${num}](${p.html_url}) | ${p.title} | @${p.user.login} | ${mergedAt} | ${labels || '—'} |`
+                );
+              } catch (e) {
+                prRows.push(`| #${num} | _could not fetch_ | — | — | — |`);
+              }
+            }
+
+            const prTable = prRows.length
+              ? [
+                  `| PR | Title | Author | Merged | Labels |`,
+                  `|----|-------|--------|--------|--------|`,
+                  ...prRows
+                ].join('\n')
+              : '_No constituent PRs detected — commits may have been pushed directly._';
+
+            // ── Jenkins placeholder table (will be updated by update-pr-jenkins job) ──
+            const jenkinsPlaceholder = [
+              `| Jenkins Job | Status | Build Link |`,
+              `|-------------|--------|------------|`,
+              `| CheckRegressionRunReadiness | ⏳ Running… | _pending_ |`,
+            ].join('\n');
+
+            const body = [
+              `## 🚂 Weekly Merge Train: \`${head}\` → \`${base}\` (${today})`,
+              ``,
+              `> Automated weekly promotion. Workflow run: [${context.runId}](${runUrl})`,
+              ``,
+              `---`,
+              `## 📋 Constituent PRs (${prRows.length} PR${prRows.length !== 1 ? 's' : ''})`,
+              ``,
+              prTable,
+              ``,
+              `---`,
+              `## 🔧 Jenkins Validation`,
+              ``,
+              jenkinsPlaceholder,
+              ``,
+              `<!-- JENKINS_BLOCK_START -->`,
+              jenkinsPlaceholder,
+              `<!-- JENKINS_BLOCK_END -->`,
+              ``,
+              `---`,
+              `## 📊 Final Result`,
+              ``,
+              `_Pending — will be updated after the workflow completes._`,
+              `<!-- RESULT_BLOCK_START -->`,
+              `_Pending_`,
+              `<!-- RESULT_BLOCK_END -->`,
+            ].join('\n');
+
+            // Find existing open promotion PR or create one
+            let pr;
+            const { data: existing } = await github.rest.pulls.list({
+              owner, repo, state: 'open', base, head: `${owner}:${head}`
+            });
+            if (existing.length) {
+              pr = existing[0];
+              core.info(`Reusing promotion PR #${pr.number}`);
+              await github.rest.pulls.update({ owner, repo, pull_number: pr.number, body });
+            } else {
+              const { data: created } = await github.rest.pulls.create({
+                owner, repo, base, head,
+                title: `Weekly merge train: ${head} -> ${base} (${today})`,
+                body
+              });
+              pr = created;
+              core.info(`Created promotion PR #${pr.number}`);
+            }
+
+            core.setOutput('pr-number', String(pr.number));
+            core.setOutput('pr-url',    pr.html_url);
+
+  # ===========================================================================
+  # 3) Validate integration — trigger Jenkins jobs; gate on green.
+  #    Outputs the build URL for each matrix leg so the next job can patch
+  #    the PR body with real links.
   # ===========================================================================
   validate-integration:
     name: "Validate integration — ${{ matrix.job }}"
     runs-on: ubuntu-latest
-    needs: preflight
+    needs: [preflight, raise-pr]
     if: needs.preflight.outputs.should-run == 'true'
     strategy:
       fail-fast: false
       matrix:
         # CONFIRM: these must match your real Jenkins job names / paths.
         job: [CheckRegressionRunReadiness]
+    outputs:
+      build-url: ${{ steps.jenkins.outputs.build-url }}
+      result:    ${{ steps.jenkins.outputs.result }}
     steps:
       - name: Trigger and wait for ${{ matrix.job }} on integration
+        id: jenkins
         env:
           JENKINS_URL: ${{ secrets.JENKINS_URL }}
           JENKINS_USER: ${{ secrets.JENKINS_USER }}
@@ -143,6 +244,8 @@ jobs:
           # Testing escape-hatch: skip Jenkins entirely and treat the job as successful.
           if [ "${{ inputs.skip_jenkins }}" = "true" ]; then
             echo "skip_jenkins=true — skipping Jenkins trigger, treating ${{ matrix.job }} as SUCCESS."
+            echo "build-url=_skipped_" >> "$GITHUB_OUTPUT"
+            echo "result=SUCCESS"      >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -152,14 +255,14 @@ jobs:
             exit 1
           fi
 
-          # Keep credentials OUT of the process list (no --user on the command line).
+          # Keep credentials OUT of the process list.
           CFG="$(mktemp)"; chmod 600 "$CFG"
           printf 'user = "%s:%s"\n' "$JENKINS_USER" "$JENKINS_API_TOKEN" > "$CFG"
           trap 'rm -f "$CFG"' EXIT
 
           CRUMB=$(curl -sf -K "$CFG" "$JENKINS_URL/crumbIssuer/api/json" | jq -r '.crumb')
 
-          # CONFIRM: job path + parameter names. Triggering against the integration branch.
+          # CONFIRM: job path + parameter names.
           LOC=$(curl -sf -K "$CFG" -H "Jenkins-Crumb:$CRUMB" -D - -o /dev/null \
                   -X POST "$JENKINS_URL/job/${{ matrix.job }}/buildWithParameters?branch=$INTEGRATION_BRANCH" \
                 | awk 'BEGIN{IGNORECASE=1}/^location:/{print $2}' | tr -d '\r')
@@ -174,64 +277,100 @@ jobs:
           done
           [ -n "$BUILD_URL" ] || { echo "::error::Build never started for ${{ matrix.job }}"; exit 1; }
           echo "Building: $BUILD_URL"
+          echo "build-url=${BUILD_URL}" >> "$GITHUB_OUTPUT"
 
-          # Poll the build to completion (up to ~30 min — tune per job duration).
+          # Poll the build to completion (up to ~30 min).
           for _ in $(seq 1 60); do
             INFO=$(curl -sf -K "$CFG" "${BUILD_URL}api/json")
             BUILDING=$(echo "$INFO" | jq -r '.building')
-            RESULT=$(echo "$INFO" | jq -r '.result // "null"')
+            RESULT=$(echo "$INFO"   | jq -r '.result // "null"')
             if [ "$BUILDING" = "false" ] && [ "$RESULT" != "null" ]; then
               echo "${{ matrix.job }} result: $RESULT"
+              echo "result=${RESULT}" >> "$GITHUB_OUTPUT"
               [ "$RESULT" = "SUCCESS" ] && exit 0 || exit 1
             fi
             sleep 30
           done
           echo "::error::Timed out waiting for ${{ matrix.job }}"; exit 1
 
-      # ── Alternative wait mechanism ───────────────────────────────────────
-      # If your post-merge jobs already report back to GitHub as COMMIT STATUSES
-      # on the integration head (the same pattern PR Auto-Merge reads via
-      # getCombinedStatusForRef), you can drop the Jenkins poll above and instead
-      # poll github.rest.repos.getCombinedStatusForRef for the 3 named statuses.
-
   # ===========================================================================
-  # 2b) Alert QTF — the "Is successful? -> no" branch
+  # 4) Update PR — patch the Jenkins block with real build URLs + results.
   # ===========================================================================
-  # Fires only when the post-merge jobs are NOT all green. Opens (or updates)
-  # a tracking issue tagging the QTF team so a red integration never passes
-  # silently. Promotion is blocked anyway because `promote` requires success.
-  # CONFIRM: create the `merge-train-alert` label once in the repo.
-  # ===========================================================================
-  alert-integration-failure:
-    name: "Alert QTF — integration validation failed"
+  update-pr-jenkins:
+    name: "Update PR — Jenkins results"
     runs-on: ubuntu-latest
-    needs: [preflight, validate-integration]
-    if: needs.preflight.outputs.should-run == 'true' && needs.validate-integration.result == 'failure'
+    needs: [raise-pr, validate-integration]
+    if: always() && needs.raise-pr.result == 'success'
     steps:
-      - name: Open or update QTF alert issue
+      - name: Patch PR body with Jenkins build links
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.QTF_REVIEW_TOKEN }}
           script: |
-            const owner = context.repo.owner, repo = context.repo.repo;
-            const qtf   = process.env.QTF_TEAM;
-            const label = 'merge-train-alert';
-            const today = new Date().toISOString().slice(0, 10);
-            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-            const body =
-              `### 🔴 Merge train — integration post-merge validation failed\n\n` +
-              `One or more post-merge jobs (CheckRegressionRunReadiness / UpdateQeopsTable / ` +
-              `AHA transfer test execution) failed on \`${process.env.INTEGRATION_BRANCH}\`. ` +
-              `Promotion to \`${process.env.MASTER_BRANCH}\` is blocked.\n\n` +
-              `Run: ${runUrl}\n\n@${owner}/${qtf} please triage.`;
+            const owner   = context.repo.owner, repo = context.repo.repo;
+            const prNum   = parseInt('${{ needs.raise-pr.outputs.pr-number }}');
+            const jobResult   = '${{ needs.validate-integration.outputs.result }}';
+            const buildUrl    = '${{ needs.validate-integration.outputs.build-url }}';
+            const overallPass = '${{ needs.validate-integration.result }}' === 'success';
 
-            // Reuse an open alert issue if one exists, otherwise open a new one.
+            const icon = overallPass ? '✅' : '❌';
+            const linkCell = buildUrl && buildUrl !== '_skipped_' && buildUrl !== ''
+              ? `[View build](${buildUrl})`
+              : buildUrl === '_skipped_' ? '_skipped (skip_jenkins=true)_' : '_unavailable_';
+
+            const newBlock = [
+              `| Jenkins Job | Status | Build Link |`,
+              `|-------------|--------|------------|`,
+              `| CheckRegressionRunReadiness | ${icon} ${jobResult || (overallPass ? 'SUCCESS' : 'FAILED')} | ${linkCell} |`,
+            ].join('\n');
+
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNum });
+            const updated = pr.body
+              .replace(
+                /<!-- JENKINS_BLOCK_START -->[\s\S]*?<!-- JENKINS_BLOCK_END -->/,
+                `<!-- JENKINS_BLOCK_START -->\n${newBlock}\n<!-- JENKINS_BLOCK_END -->`
+              );
+            await github.rest.pulls.update({ owner, repo, pull_number: prNum, body: updated });
+            core.info(`PR #${prNum} Jenkins block updated.`);
+
+  # ===========================================================================
+  # 5) Alert on failure — Teams notification + tracking issue.
+  #    Fires on: Jenkins failure OR promote conflict/failure.
+  #    CONFIRM: create the `merge-train-alert` label once in the repo.
+  # ===========================================================================
+  alert-on-failure:
+    name: "Alert — validation failed"
+    runs-on: ubuntu-latest
+    needs: [preflight, raise-pr, validate-integration]
+    if: |
+      needs.preflight.outputs.should-run == 'true' &&
+      needs.validate-integration.result == 'failure'
+    steps:
+      - name: Open or update tracking issue
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.QTF_REVIEW_TOKEN }}
+          script: |
+            const owner  = context.repo.owner, repo = context.repo.repo;
+            const qtf    = process.env.QTF_TEAM;
+            const label  = 'merge-train-alert';
+            const today  = new Date().toISOString().slice(0, 10);
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const prUrl  = '${{ needs.raise-pr.outputs.pr-url }}';
+            const body   =
+              `### 🔴 Merge train — integration validation failed\n\n` +
+              `**Jenkins job:** CheckRegressionRunReadiness\n` +
+              `**Promotion PR:** ${prUrl}\n` +
+              `**Workflow run:** ${runUrl}\n\n` +
+              `Promotion to \`${process.env.MASTER_BRANCH}\` is **blocked**.\n\n` +
+              `@${owner}/${qtf} please triage.`;
+
             const { data: open } = await github.rest.issues.listForRepo({
               owner, repo, state: 'open', labels: label
             });
             if (open.length) {
               await github.rest.issues.createComment({ owner, repo, issue_number: open[0].number, body });
-              core.notice(`Updated existing alert issue #${open[0].number}`);
+              core.notice(`Updated alert issue #${open[0].number}`);
             } else {
               const { data: issue } = await github.rest.issues.create({
                 owner, repo, labels: [label],
@@ -239,112 +378,305 @@ jobs:
               });
               core.notice(`Opened alert issue #${issue.number}`);
             }
-            core.setFailed('Integration post-merge validation failed — QTF alerted, promotion blocked.');
+
+      - name: Notify Teams — validation failure
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        run: |
+          # CONFIRM: set TEAMS_WEBHOOK_URL secret to your incoming webhook URL.
+          if [ -z "${TEAMS_WEBHOOK_URL:-}" ]; then
+            echo "TEAMS_WEBHOOK_URL not set — skipping Teams notification."
+            exit 0
+          fi
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          PR_URL="${{ needs.raise-pr.outputs.pr-url }}"
+          PAYLOAD=$(jq -n \
+            --arg runUrl  "$RUN_URL" \
+            --arg prUrl   "$PR_URL" \
+            --arg repo    "${{ github.repository }}" \
+            '{
+              "@type": "MessageCard",
+              "@context": "https://schema.org/extensions",
+              "themeColor": "FF0000",
+              "summary": "Merge train — integration validation FAILED",
+              "sections": [{
+                "activityTitle": "🔴 Merge Train — Integration Validation FAILED",
+                "activitySubtitle": $repo,
+                "facts": [
+                  {"name": "Jenkins Job",      "value": "CheckRegressionRunReadiness"},
+                  {"name": "Branch",           "value": "integration"},
+                  {"name": "Promotion PR",     "value": $prUrl},
+                  {"name": "Workflow Run",     "value": $runUrl},
+                  {"name": "Action Required",  "value": "Triage the failure and re-run once fixed."}
+                ],
+                "markdown": true
+              }],
+              "potentialAction": [{
+                "@type": "OpenUri",
+                "name": "View Workflow Run",
+                "targets": [{"os": "default", "uri": $runUrl}]
+              }]
+            }')
+          curl -sf -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$TEAMS_WEBHOOK_URL"
+          echo "Teams failure notification sent."
+
+      - name: Mark job failed
+        run: |
+          echo "::error::Integration validation failed — promotion blocked. See tracking issue and Teams alert."
+          exit 1
 
   # ===========================================================================
-  # 3) Promote — Mergeable? -> Raise PR -> Merge to master
+  # 6) Promote — merge the promotion PR to master.
   # ===========================================================================
   promote:
     name: "Promote integration -> master"
     runs-on: ubuntu-latest
-    needs: [preflight, validate-integration]
-    if: needs.preflight.outputs.should-run == 'true' && needs.validate-integration.result == 'success'
+    needs: [preflight, raise-pr, validate-integration, update-pr-jenkins]
+    if: |
+      needs.preflight.outputs.should-run == 'true' &&
+      needs.validate-integration.result == 'success'
     steps:
-      - name: Raise / find promotion PR, verify mergeability, merge
+      - name: Verify mergeability and merge
+        id: merge
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.QTF_REVIEW_TOKEN }}
           script: |
-            const owner = context.repo.owner, repo = context.repo.repo;
-            const base = process.env.MASTER_BRANCH, head = process.env.INTEGRATION_BRANCH;
-            const qtf  = process.env.QTF_TEAM;
+            const owner  = context.repo.owner, repo = context.repo.repo;
+            const base   = process.env.MASTER_BRANCH, head = process.env.INTEGRATION_BRANCH;
+            const qtf    = process.env.QTF_TEAM;
+            const prNum  = parseInt('${{ needs.raise-pr.outputs.pr-number }}');
             const dryRun = context.eventName === 'workflow_dispatch'
                         && context.payload.inputs?.dry_run === 'true';
 
-            // Find an existing open promotion PR, or create one.
-            let pr;
-            const { data: existing } = await github.rest.pulls.list({
-              owner, repo, state: 'open', base, head: `${owner}:${head}` 
-            });
-            if (existing.length) {
-              pr = existing[0];
-              core.info(`Reusing promotion PR #${pr.number}`);
-            } else {
-              const today = new Date().toISOString().slice(0, 10);
-              const { data: created } = await github.rest.pulls.create({
-                owner, repo, base, head,
-                title: `Weekly merge train: ${head} -> ${base} (${today})`,
-                body: 'Automated weekly promotion. Integration validated green by the post-merge jobs.'
-              });
-              pr = created;
-              core.info(`Created promotion PR #${pr.number}`);
-            }
-
-            // GitHub computes mergeability asynchronously — poll until known.
+            // Poll mergeability (GitHub computes it asynchronously).
+            let { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNum });
             let mergeable = pr.mergeable, state = pr.mergeable_state;
             for (let i = 0; i < 12 && (mergeable === null || state === 'unknown'); i++) {
               await new Promise(r => setTimeout(r, 5000));
-              const { data: p } = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
-              mergeable = p.mergeable; state = p.mergeable_state;
+              ({ data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNum }));
+              mergeable = pr.mergeable; state = pr.mergeable_state;
             }
-            core.info(`PR #${pr.number} mergeable=${mergeable} state=${state}`);
+            core.info(`PR #${prNum} mergeable=${mergeable} state=${state}`);
 
-            // ── Conflict / divergence off-ramp — HALT + alert, never auto-resolve ──
+            // ── Conflict off-ramp ──
             if (mergeable === false || state === 'dirty') {
               await github.rest.issues.createComment({
-                owner, repo, issue_number: pr.number,
-                body: `### ⛔ Merge train halted — integration is not mergeable to master\n\n` +
-                      `\`${head}\` cannot be merged cleanly into \`${base}\` (an emergency merge likely diverged master). ` +
-                      `Conflicts are resolved manually — the train does not auto-resolve.\n\n` +
-                      `@${owner}/${qtf} please sync and resolve.` 
+                owner, repo, issue_number: prNum,
+                body: `### ⛔ Merge train halted — not mergeable\n\n` +
+                      `\`${head}\` cannot be cleanly merged into \`${base}\`. ` +
+                      `Conflicts must be resolved manually.\n\n@${owner}/${qtf} please sync and resolve.`
               });
               try {
                 await github.rest.pulls.requestReviewers({
-                  owner, repo, pull_number: pr.number, team_reviewers: [qtf]
+                  owner, repo, pull_number: prNum, team_reviewers: [qtf]
                 });
               } catch (e) { core.warning(`Could not request QTF review: ${e.message}`); }
-              core.setFailed('Promotion PR not mergeable — halted and alerted QTF team.');
+              core.setOutput('outcome', 'conflict');
+              core.setFailed('Promotion PR not mergeable.');
               return;
             }
 
             if (dryRun) {
-              core.notice(`Dry run — PR #${pr.number} is mergeable (${state}); not merging.`);
+              core.notice(`Dry run — PR #${prNum} is mergeable (${state}); not merging.`);
+              core.setOutput('outcome', 'dry-run');
               return;
             }
 
-            // ── Merge. 'merge' preserves integration history; use 'squash' if preferred. ──
+            // ── Merge ──
             try {
               const { data: res } = await github.rest.pulls.merge({
-                owner, repo, pull_number: pr.number, merge_method: 'merge',
-                commit_title: `Weekly merge train: ${head} -> ${base} (#${pr.number})` 
+                owner, repo, pull_number: prNum, merge_method: 'merge',
+                commit_title: `Weekly merge train: ${head} -> ${base} (#${prNum})`
               });
-              core.notice(`Promoted to ${base}. Merge SHA ${res.sha.substring(0, 7)}.`);
+              core.notice(`Promoted! Merge SHA: ${res.sha.substring(0, 7)}`);
+              core.setOutput('outcome', 'merged');
+              core.setOutput('merge-sha', res.sha.substring(0, 7));
             } catch (e) {
               await github.rest.issues.createComment({
-                owner, repo, issue_number: pr.number,
-                body: `### ⚠️ Merge train — promotion merge failed\n\n> ${e.message}\n\n@${owner}/${qtf} please investigate.` 
+                owner, repo, issue_number: prNum,
+                body: `### ⚠️ Merge train — merge failed\n\n> ${e.message}\n\n@${owner}/${qtf} please investigate.`
               });
+              core.setOutput('outcome', 'error');
               core.setFailed(`Merge failed: ${e.message}`);
             }
 
+      - name: Notify Teams — promote conflict/error
+        if: failure()
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        run: |
+          if [ -z "${TEAMS_WEBHOOK_URL:-}" ]; then exit 0; fi
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          PR_URL="${{ needs.raise-pr.outputs.pr-url }}"
+          PAYLOAD=$(jq -n \
+            --arg runUrl "$RUN_URL" \
+            --arg prUrl  "$PR_URL" \
+            --arg repo   "${{ github.repository }}" \
+            '{
+              "@type": "MessageCard",
+              "@context": "https://schema.org/extensions",
+              "themeColor": "FF6600",
+              "summary": "Merge train — promotion BLOCKED/FAILED",
+              "sections": [{
+                "activityTitle": "⚠️ Merge Train — Promotion BLOCKED or FAILED",
+                "activitySubtitle": $repo,
+                "facts": [
+                  {"name": "Promotion PR",    "value": $prUrl},
+                  {"name": "Workflow Run",    "value": $runUrl},
+                  {"name": "Action Required", "value": "Check the PR for conflict details and resolve manually."}
+                ],
+                "markdown": true
+              }],
+              "potentialAction": [{
+                "@type": "OpenUri",
+                "name": "View Promotion PR",
+                "targets": [{"os": "default", "uri": $prUrl}]
+              }]
+            }')
+          curl -sf -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$TEAMS_WEBHOOK_URL"
+
   # ===========================================================================
-  # 4) Report — always summarise the run
+  # 7) Report — always: update PR body final result + step summary + Teams.
   # ===========================================================================
   report:
     name: "Report"
     runs-on: ubuntu-latest
-    needs: [preflight, validate-integration, alert-integration-failure, promote]
+    needs: [preflight, raise-pr, validate-integration, alert-on-failure, promote]
     if: always()
     steps:
-      - name: Summarise run
+      - name: Build final status strings
+        id: status
+        run: |
+          VAL="${{ needs.validate-integration.result }}"
+          PROM="${{ needs.promote.result }}"
+          ALERT="${{ needs.alert-on-failure.result }}"
+
+          if   [ "$VAL"  = "success" ] && [ "$PROM" = "success" ]; then OVERALL="✅ Promoted to master"
+          elif [ "$VAL"  = "success" ] && [ "$PROM" = "skipped" ]; then OVERALL="⏭️ Validation passed — promotion skipped (dry run or no-op)"
+          elif [ "$VAL"  = "failure" ]; then OVERALL="❌ Integration validation FAILED — promotion blocked"
+          elif [ "$PROM" = "failure" ]; then OVERALL="⚠️ Validation passed but promotion FAILED"
+          else OVERALL="⚠️ Unexpected state — check workflow logs"
+          fi
+          echo "overall=${OVERALL}" >> "$GITHUB_OUTPUT"
+
+          VAL_ICON="$([ "$VAL" = "success" ] && echo ✅ || echo ❌)"
+          PROM_ICON="$([ "$PROM" = "success" ] && echo ✅ || ([ "$PROM" = "skipped" ] && echo ⏭️ || echo ❌))"
+          ALERT_ICON="$([ "$ALERT" = "skipped" ] && echo — || echo 🔔)"
+          echo "val-icon=${VAL_ICON}"   >> "$GITHUB_OUTPUT"
+          echo "prom-icon=${PROM_ICON}" >> "$GITHUB_OUTPUT"
+          echo "alert-icon=${ALERT_ICON}" >> "$GITHUB_OUTPUT"
+
+      - name: Update PR body — final result block
+        if: needs.raise-pr.result == 'success'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.QTF_REVIEW_TOKEN }}
+          script: |
+            const owner  = context.repo.owner, repo = context.repo.repo;
+            const prNum  = parseInt('${{ needs.raise-pr.outputs.pr-number }}');
+            const overall = `${{ steps.status.outputs.overall }}`;
+            const runUrl  = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            const resultBlock = [
+              `**Status:** ${overall}`,
+              `**Workflow run:** [${context.runId}](${runUrl})`,
+              `**Completed:** ${new Date().toISOString()}`,
+            ].join('\n');
+
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNum });
+            const updated = pr.body
+              .replace(
+                /<!-- RESULT_BLOCK_START -->[\s\S]*?<!-- RESULT_BLOCK_END -->/,
+                `<!-- RESULT_BLOCK_START -->\n${resultBlock}\n<!-- RESULT_BLOCK_END -->`
+              );
+            await github.rest.pulls.update({ owner, repo, pull_number: prNum, body: updated });
+
+            // Also post a comment with the final summary so it appears in the PR timeline.
+            const valResult   = '${{ needs.validate-integration.result }}';
+            const promResult  = '${{ needs.promote.result }}';
+            const alertResult = '${{ needs.alert-on-failure.result }}';
+            const buildUrl    = '${{ needs.validate-integration.outputs.build-url }}';
+            const buildLink   = buildUrl && buildUrl !== '_skipped_' && buildUrl !== ''
+              ? `[View build](${buildUrl})` : buildUrl || '—';
+
+            const comment = [
+              `## 📊 Master Merge Workflow — Final Report`,
+              ``,
+              `**${overall}**`,
+              ``,
+              `| Step | Result |`,
+              `|------|--------|`,
+              `| Preflight | ✅ |`,
+              `| Raise PR | ✅ PR #${prNum} |`,
+              `| Jenkins — CheckRegressionRunReadiness | ${{ steps.status.outputs.val-icon }} ${buildLink} |`,
+              `| QTF Alert | ${{ steps.status.outputs.alert-icon }} ${alertResult} |`,
+              `| Promote | ${{ steps.status.outputs.prom-icon }} ${promResult} |`,
+              ``,
+              `Workflow run: [${context.runId}](${runUrl})`,
+            ].join('\n');
+            await github.rest.issues.createComment({ owner, repo, issue_number: prNum, body: comment });
+            core.info(`Final report comment posted on PR #${prNum}.`);
+
+      - name: Write step summary
         run: |
           {
-            echo "## Master Merge Workflow — run summary"
-            echo "- Anything to promote: ${{ needs.preflight.outputs.should-run == 'true' && 'yes' || 'no (integration not ahead of master)' }}"
-            echo "- Integration validation: ${{ needs.validate-integration.result }}"
-            echo "- QTF alert raised: ${{ needs.alert-integration-failure.result != 'skipped' && 'yes' || 'no' }}"
-            echo "- Promotion: ${{ needs.promote.result }}"
+            echo "## 🚂 Master Merge Workflow — Run Summary"
+            echo ""
+            echo "| Step | Result |"
+            echo "|------|--------|"
+            echo "| Anything to promote | ${{ needs.preflight.outputs.should-run == 'true' && 'Yes' || 'No' }} |"
+            echo "| Integration validation | ${{ needs.validate-integration.result }} |"
+            echo "| QTF alert | ${{ needs.alert-on-failure.result }} |"
+            echo "| Promotion | ${{ needs.promote.result }} |"
+            echo ""
+            echo "**Overall:** ${{ steps.status.outputs.overall }}"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notify Teams — success
+        if: needs.promote.result == 'success'
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        run: |
+          # CONFIRM: set TEAMS_WEBHOOK_URL secret to your incoming webhook URL.
+          if [ -z "${TEAMS_WEBHOOK_URL:-}" ]; then
+            echo "TEAMS_WEBHOOK_URL not set — skipping Teams notification."
+            exit 0
+          fi
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          PR_URL="${{ needs.raise-pr.outputs.pr-url }}"
+          BUILD_URL="${{ needs.validate-integration.outputs.build-url }}"
+          AHEAD="${{ needs.preflight.outputs.ahead-by }}"
+          PAYLOAD=$(jq -n \
+            --arg runUrl   "$RUN_URL" \
+            --arg prUrl    "$PR_URL" \
+            --arg buildUrl "$BUILD_URL" \
+            --arg ahead    "$AHEAD" \
+            --arg repo     "${{ github.repository }}" \
+            '{
+              "@type": "MessageCard",
+              "@context": "https://schema.org/extensions",
+              "themeColor": "00AA00",
+              "summary": "Merge train — integration promoted to master ✅",
+              "sections": [{
+                "activityTitle": "✅ Merge Train — Integration Promoted to Master",
+                "activitySubtitle": $repo,
+                "facts": [
+                  {"name": "Commits promoted", "value": $ahead},
+                  {"name": "Promotion PR",     "value": $prUrl},
+                  {"name": "Jenkins build",    "value": $buildUrl},
+                  {"name": "Workflow run",     "value": $runUrl}
+                ],
+                "markdown": true
+              }],
+              "potentialAction": [{
+                "@type": "OpenUri",
+                "name": "View Promotion PR",
+                "targets": [{"os": "default", "uri": $prUrl}]
+              }]
+            }')
+          curl -sf -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$TEAMS_WEBHOOK_URL"
+          echo "Teams success notification sent."
 
 # =============================================================================
 # OPTIONAL — post-promotion master re-validation + revert
