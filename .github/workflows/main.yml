@@ -178,7 +178,7 @@ jobs:
                 "content": {
                   "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                   "type": "AdaptiveCard",
-                  "version": "1.4",
+                  "version": "1.2",
                   "msteams": {"width": "Full"},
                   "body": [
                     {"type": "TextBlock", "size": "Large", "weight": "Bolder",
@@ -577,7 +577,7 @@ jobs:
                 "content": {
                   "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                   "type": "AdaptiveCard",
-                  "version": "1.4",
+                  "version": "1.2",
                   "msteams": {"width": "Full"},
                   "body": [
                     {"type": "TextBlock", "size": "Large", "weight": "Bolder",
@@ -705,7 +705,7 @@ jobs:
                 "content": {
                   "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                   "type": "AdaptiveCard",
-                  "version": "1.4",
+                  "version": "1.2",
                   "msteams": {"width": "Full"},
                   "body": [
                     {"type": "TextBlock", "size": "Large", "weight": "Bolder",
@@ -856,7 +856,7 @@ jobs:
                 "content": {
                   "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                   "type": "AdaptiveCard",
-                  "version": "1.4",
+                  "version": "1.2",
                   "msteams": {"width": "Full"},
                   "body": [
                     {"type": "TextBlock", "size": "Large", "weight": "Bolder",
