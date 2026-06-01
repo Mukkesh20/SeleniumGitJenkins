@@ -32,7 +32,7 @@ public class class2 {
 	
 	@Test 
 	public void test2() {
-		System.out.println("test22 executed");
+		System.out.println("test22 executed now");
 	}
 	
 	@AfterMethod
