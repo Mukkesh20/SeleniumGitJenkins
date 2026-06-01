@@ -388,7 +388,6 @@ jobs:
         env:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
         run: |
-          # CONFIRM: set TEAMS_WEBHOOK_URL secret to your incoming webhook URL.
           if [ -z "${TEAMS_WEBHOOK_URL:-}" ]; then
             echo "TEAMS_WEBHOOK_URL not set — skipping Teams notification."
             exit 0
@@ -396,33 +395,42 @@ jobs:
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           PR_URL="${{ needs.raise-pr.outputs.pr-url }}"
           PAYLOAD=$(jq -n \
-            --arg runUrl  "$RUN_URL" \
-            --arg prUrl   "$PR_URL" \
-            --arg repo    "${{ github.repository }}" \
+            --arg runUrl "$RUN_URL" \
+            --arg prUrl  "$PR_URL" \
+            --arg repo   "${{ github.repository }}" \
             '{
-              "@type": "MessageCard",
-              "@context": "https://schema.org/extensions",
-              "themeColor": "FF0000",
-              "summary": "Merge train — integration validation FAILED",
-              "sections": [{
-                "activityTitle": "🔴 Merge Train — Integration Validation FAILED",
-                "activitySubtitle": $repo,
-                "facts": [
-                  {"name": "Jenkins Job",      "value": "CheckRegressionRunReadiness"},
-                  {"name": "Branch",           "value": "integration"},
-                  {"name": "Promotion PR",     "value": $prUrl},
-                  {"name": "Workflow Run",     "value": $runUrl},
-                  {"name": "Action Required",  "value": "Triage the failure and re-run once fixed."}
-                ],
-                "markdown": true
-              }],
-              "potentialAction": [{
-                "@type": "OpenUri",
-                "name": "View Workflow Run",
-                "targets": [{"os": "default", "uri": $runUrl}]
+              "type": "message",
+              "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard",
+                  "version": "1.4",
+                  "msteams": {"width": "Full"},
+                  "body": [
+                    {"type": "TextBlock", "size": "Large", "weight": "Bolder",
+                     "text": "🔴 Merge Train — Integration Validation FAILED", "wrap": true},
+                    {"type": "FactSet", "facts": [
+                      {"title": "Repository",      "value": $repo},
+                      {"title": "Jenkins Job",     "value": "CheckRegressionRunReadiness"},
+                      {"title": "Branch",          "value": "integration"},
+                      {"title": "Promotion PR",    "value": $prUrl},
+                      {"title": "Workflow Run",    "value": $runUrl},
+                      {"title": "Action Required", "value": "Triage the failure and re-run once fixed."}
+                    ]}
+                  ],
+                  "actions": [{
+                    "type": "Action.OpenUrl",
+                    "title": "View Workflow Run",
+                    "url": $runUrl
+                  }]
+                }
               }]
             }')
-          curl -sf -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$TEAMS_WEBHOOK_URL"
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$TEAMS_WEBHOOK_URL")
+          echo "Teams HTTP status: $HTTP_STATUS"
+          [[ "$HTTP_STATUS" =~ ^2 ]] || echo "::warning::Teams notification returned HTTP $HTTP_STATUS"
           echo "Teams failure notification sent."
 
       - name: Mark job failed
@@ -519,27 +527,36 @@ jobs:
             --arg prUrl  "$PR_URL" \
             --arg repo   "${{ github.repository }}" \
             '{
-              "@type": "MessageCard",
-              "@context": "https://schema.org/extensions",
-              "themeColor": "FF6600",
-              "summary": "Merge train — promotion BLOCKED/FAILED",
-              "sections": [{
-                "activityTitle": "⚠️ Merge Train — Promotion BLOCKED or FAILED",
-                "activitySubtitle": $repo,
-                "facts": [
-                  {"name": "Promotion PR",    "value": $prUrl},
-                  {"name": "Workflow Run",    "value": $runUrl},
-                  {"name": "Action Required", "value": "Check the PR for conflict details and resolve manually."}
-                ],
-                "markdown": true
-              }],
-              "potentialAction": [{
-                "@type": "OpenUri",
-                "name": "View Promotion PR",
-                "targets": [{"os": "default", "uri": $prUrl}]
+              "type": "message",
+              "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard",
+                  "version": "1.4",
+                  "msteams": {"width": "Full"},
+                  "body": [
+                    {"type": "TextBlock", "size": "Large", "weight": "Bolder",
+                     "text": "⚠️ Merge Train — Promotion BLOCKED or FAILED", "wrap": true},
+                    {"type": "FactSet", "facts": [
+                      {"title": "Repository",      "value": $repo},
+                      {"title": "Promotion PR",    "value": $prUrl},
+                      {"title": "Workflow Run",    "value": $runUrl},
+                      {"title": "Action Required", "value": "Check the PR for conflict details and resolve manually."}
+                    ]}
+                  ],
+                  "actions": [{
+                    "type": "Action.OpenUrl",
+                    "title": "View Promotion PR",
+                    "url": $prUrl
+                  }]
+                }
               }]
             }')
-          curl -sf -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$TEAMS_WEBHOOK_URL"
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$TEAMS_WEBHOOK_URL")
+          echo "Teams HTTP status: $HTTP_STATUS"
+          [[ "$HTTP_STATUS" =~ ^2 ]] || echo "::warning::Teams notification returned HTTP $HTTP_STATUS"
 
   # ===========================================================================
   # 7) Report — always: update PR body final result + step summary + Teams.
@@ -659,28 +676,37 @@ jobs:
             --arg ahead    "$AHEAD" \
             --arg repo     "${{ github.repository }}" \
             '{
-              "@type": "MessageCard",
-              "@context": "https://schema.org/extensions",
-              "themeColor": "00AA00",
-              "summary": "Merge train — integration promoted to master ✅",
-              "sections": [{
-                "activityTitle": "✅ Merge Train — Integration Promoted to Master",
-                "activitySubtitle": $repo,
-                "facts": [
-                  {"name": "Commits promoted", "value": $ahead},
-                  {"name": "Promotion PR",     "value": $prUrl},
-                  {"name": "Jenkins build",    "value": $buildUrl},
-                  {"name": "Workflow run",     "value": $runUrl}
-                ],
-                "markdown": true
-              }],
-              "potentialAction": [{
-                "@type": "OpenUri",
-                "name": "View Promotion PR",
-                "targets": [{"os": "default", "uri": $prUrl}]
+              "type": "message",
+              "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard",
+                  "version": "1.4",
+                  "msteams": {"width": "Full"},
+                  "body": [
+                    {"type": "TextBlock", "size": "Large", "weight": "Bolder",
+                     "text": "✅ Merge Train — Integration Promoted to Master", "wrap": true},
+                    {"type": "FactSet", "facts": [
+                      {"title": "Repository",       "value": $repo},
+                      {"title": "Commits promoted", "value": $ahead},
+                      {"title": "Promotion PR",     "value": $prUrl},
+                      {"title": "Jenkins build",    "value": $buildUrl},
+                      {"title": "Workflow run",     "value": $runUrl}
+                    ]}
+                  ],
+                  "actions": [{
+                    "type": "Action.OpenUrl",
+                    "title": "View Promotion PR",
+                    "url": $prUrl
+                  }]
+                }
               }]
             }')
-          curl -sf -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$TEAMS_WEBHOOK_URL"
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$TEAMS_WEBHOOK_URL")
+          echo "Teams HTTP status: $HTTP_STATUS"
+          [[ "$HTTP_STATUS" =~ ^2 ]] || echo "::warning::Teams notification returned HTTP $HTTP_STATUS"
           echo "Teams success notification sent."
 
 # =============================================================================
