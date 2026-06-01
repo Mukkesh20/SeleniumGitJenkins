@@ -259,16 +259,29 @@ jobs:
             exit 1
           fi
 
+          # ── Diagnostics: print URL shape and DNS resolution before any real call ──
+          JENKINS_HOST=$(echo "$JENKINS_URL" | sed 's|https\?://||' | cut -d'/' -f1 | tr -d '[:space:]')
+          echo "JENKINS_HOST (extracted): '${JENKINS_HOST}'"
+          echo "JENKINS_URL byte length : $(echo -n "$JENKINS_URL" | wc -c)"
+          nslookup "$JENKINS_HOST" 2>&1 || echo "nslookup failed — host not resolvable from this runner"
+
           # Keep credentials OUT of the process list.
           CFG="$(mktemp)"; chmod 600 "$CFG"
           printf 'user = "%s:%s"\n' "$JENKINS_USER" "$JENKINS_API_TOKEN" > "$CFG"
           trap 'rm -f "$CFG"' EXIT
 
-          CRUMB=$(curl -sf -K "$CFG" "$JENKINS_URL/crumbIssuer/api/json" | jq -r '.crumb')
+          CRUMB_RESP=$(curl -sS -K "$CFG" --connect-timeout 10 \
+            "$JENKINS_URL/crumbIssuer/api/json" 2>&1) || true
+          echo "Crumb response: $CRUMB_RESP"
+          CRUMB=$(echo "$CRUMB_RESP" | jq -r '.crumb // empty')
+          if [ -z "$CRUMB" ]; then
+            echo "::error::Could not obtain Jenkins crumb. Check JENKINS_URL reachability and credentials."
+            exit 1
+          fi
 
           # CONFIRM: job path + parameter names.
           LOC=$(curl -sf -K "$CFG" -H "Jenkins-Crumb:$CRUMB" -D - -o /dev/null \
-                  -X POST "$JENKINS_URL/job/${{ matrix.job }}/buildWithParameters?branchName=$INTEGRATION_BRANCH" \
+                  -X POST "$JENKINS_URL/job/${{ matrix.job }}/buildWithParameters?token=${JENKINS_API_TOKEN}&branchName=$INTEGRATION_BRANCH" \
                 | awk 'BEGIN{IGNORECASE=1}/^location:/{print $2}' | tr -d '\r')
           echo "Queued: $LOC"
 
