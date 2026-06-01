@@ -40,6 +40,10 @@ on:
         description: 'Skip Jenkins trigger/poll (testing only — treats all jobs as SUCCESS)'
         type: boolean
         default: false
+      jenkins_timeout_minutes:
+        description: 'Max minutes to wait for each Jenkins job to complete (default 30)'
+        type: number
+        default: 30
 
 permissions:
   contents: write
@@ -65,9 +69,10 @@ jobs:
     name: "Preflight — anything to promote?"
     runs-on: ubuntu-latest
     outputs:
-      should-run: ${{ steps.compare.outputs.should-run }}
-      ahead-by:   ${{ steps.compare.outputs.ahead-by }}
-      behind-by:  ${{ steps.compare.outputs.behind-by }}
+      should-run:   ${{ steps.compare.outputs.should-run }}
+      ahead-by:     ${{ steps.compare.outputs.ahead-by }}
+      behind-by:    ${{ steps.compare.outputs.behind-by }}
+      sync-needed:  ${{ steps.compare.outputs.sync-needed }}
     steps:
       - name: Compare integration vs master
         id: compare
@@ -88,13 +93,115 @@ jobs:
 
             if (cmp.ahead_by === 0) {
               core.notice('Nothing to promote — integration has no new commits over master.');
-              core.setOutput('should-run', 'false');
+              core.setOutput('should-run',  'false');
+              core.setOutput('sync-needed', 'false');
               return;
             }
             if (cmp.behind_by > 0) {
-              core.warning(`master is ahead of integration by ${cmp.behind_by} — promotion PR may conflict.`);
+              core.warning(`master is ahead of integration by ${cmp.behind_by} — will attempt auto-sync before Jenkins.`);
+              core.setOutput('sync-needed', 'true');
+            } else {
+              core.setOutput('sync-needed', 'false');
             }
             core.setOutput('should-run', 'true');
+
+  # ===========================================================================
+  # 1b) Sync integration — if master is ahead, merge master into integration.
+  #     Clean merge  → proceed (integration is now up-to-date).
+  #     Conflict     → Teams alert + halt (manual resolution required).
+  # ===========================================================================
+  sync-integration:
+    name: "Sync integration ← master"
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: needs.preflight.outputs.should-run == 'true'
+    outputs:
+      sync-result: ${{ steps.sync.outputs.sync-result }}
+    steps:
+      - name: Merge master into integration (if behind)
+        id: sync
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.QTF_REVIEW_TOKEN }}
+          script: |
+            const owner  = context.repo.owner, repo = context.repo.repo;
+            const base   = process.env.MASTER_BRANCH;
+            const head   = process.env.INTEGRATION_BRANCH;
+            const syncNeeded = '${{ needs.preflight.outputs.sync-needed }}' === 'true';
+            const behindBy   = '${{ needs.preflight.outputs.behind-by }}';
+
+            if (!syncNeeded) {
+              core.info('integration is not behind master — no sync needed.');
+              core.setOutput('sync-result', 'not-needed');
+              return;
+            }
+
+            core.info(`master is ahead by ${behindBy} commits — attempting auto-sync merge...`);
+            try {
+              await github.rest.repos.merge({
+                owner, repo,
+                base: head,
+                head: base,
+                commit_message: `chore: auto-sync ${head} with ${base} [merge-train]`
+              });
+              core.notice(`✅ Auto-sync successful — ${head} is now up-to-date with ${base}.`);
+              core.setOutput('sync-result', 'synced');
+            } catch (e) {
+              if (e.status === 409) {
+                core.setOutput('sync-result', 'conflict');
+                core.setFailed(
+                  `Merge conflict detected when syncing ${base} into ${head}. ` +
+                  `Manual resolution required before the merge train can proceed.`
+                );
+              } else {
+                core.setOutput('sync-result', 'error');
+                core.setFailed(`Unexpected error during auto-sync: ${e.message}`);
+              }
+            }
+
+      - name: Notify Teams — sync conflict
+        if: failure()
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        run: |
+          if [ -z "${TEAMS_WEBHOOK_URL:-}" ]; then exit 0; fi
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          PAYLOAD=$(jq -n \
+            --arg runUrl "$RUN_URL" \
+            --arg repo   "${{ github.repository }}" \
+            --arg base   "${{ env.MASTER_BRANCH }}" \
+            --arg head   "${{ env.INTEGRATION_BRANCH }}" \
+            '{
+              "type": "message",
+              "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard",
+                  "version": "1.4",
+                  "msteams": {"width": "Full"},
+                  "body": [
+                    {"type": "TextBlock", "size": "Large", "weight": "Bolder",
+                     "text": "⛔ Merge Train — Sync Conflict: master → integration", "wrap": true},
+                    {"type": "FactSet", "facts": [
+                      {"title": "Repository",      "value": $repo},
+                      {"title": "Conflict",        "value": "Cannot auto-merge master into integration"},
+                      {"title": "Action Required", "value": "Resolve conflicts manually and re-run the workflow"},
+                      {"title": "Workflow Run",    "value": $runUrl}
+                    ]}
+                  ],
+                  "actions": [{
+                    "type": "Action.OpenUrl",
+                    "title": "View Workflow Run",
+                    "url": $runUrl
+                  }]
+                }
+              }]
+            }')
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$TEAMS_WEBHOOK_URL")
+          echo "Teams HTTP status: $HTTP_STATUS"
+          [[ "$HTTP_STATUS" =~ ^2 ]] || echo "::warning::Teams notification returned HTTP $HTTP_STATUS"
 
   # ===========================================================================
   # 2) Raise PR — create/find the promotion PR and populate its description
@@ -103,8 +210,10 @@ jobs:
   raise-pr:
     name: "Raise promotion PR"
     runs-on: ubuntu-latest
-    needs: preflight
-    if: needs.preflight.outputs.should-run == 'true'
+    needs: [preflight, sync-integration]
+    if: |
+      needs.preflight.outputs.should-run == 'true' &&
+      needs.sync-integration.result == 'success'
     outputs:
       pr-number: ${{ steps.create.outputs.pr-number }}
       pr-url:    ${{ steps.create.outputs.pr-url }}
@@ -225,16 +334,15 @@ jobs:
   validate-integration:
     name: "Validate integration — ${{ matrix.job }}"
     runs-on: ubuntu-latest
-    needs: [preflight, raise-pr]
-    if: needs.preflight.outputs.should-run == 'true'
+    needs: [preflight, sync-integration, raise-pr]
+    if: |
+      needs.preflight.outputs.should-run == 'true' &&
+      needs.sync-integration.result == 'success'
     strategy:
       fail-fast: false
       matrix:
         # CONFIRM: these must match your real Jenkins job names / paths.
         job: [CheckRegressionRunReadiness]
-    outputs:
-      build-url: ${{ steps.jenkins.outputs.build-url }}
-      result:    ${{ steps.jenkins.outputs.result }}
     steps:
       - name: Trigger and wait for ${{ matrix.job }} on integration
         id: jenkins
@@ -281,23 +389,27 @@ jobs:
 
           # CONFIRM: job path + parameter names.
           LOC=$(curl -sf -K "$CFG" -H "Jenkins-Crumb:$CRUMB" -D - -o /dev/null \
-                  -X POST "$JENKINS_URL/job/${{ matrix.job }}/buildWithParameters?token=${JENKINS_API_TOKEN}&branchName=$INTEGRATION_BRANCH" \
+                  -X POST "$JENKINS_URL/job/${{ matrix.job }}/buildWithParameters?branch=$INTEGRATION_BRANCH" \
                 | awk 'BEGIN{IGNORECASE=1}/^location:/{print $2}' | tr -d '\r')
           echo "Queued: $LOC"
 
-          # Queue item -> build URL (wait up to ~10 min for an executor).
+          # Queue item -> build URL (wait up to 10 min for an executor).
+          QUEUE_DEADLINE=$(( $(date +%s) + 600 ))
           BUILD_URL=""
-          for _ in $(seq 1 60); do
+          while [ "$(date +%s)" -lt "$QUEUE_DEADLINE" ]; do
             BUILD_URL=$(curl -sf -K "$CFG" "${LOC}api/json" | jq -r '.executable.url // empty')
             [ -n "$BUILD_URL" ] && break
             sleep 10
           done
-          [ -n "$BUILD_URL" ] || { echo "::error::Build never started for ${{ matrix.job }}"; exit 1; }
+          [ -n "$BUILD_URL" ] || { echo "::error::Build never started for ${{ matrix.job }} within 10 min queue wait"; exit 1; }
           echo "Building: $BUILD_URL"
           echo "build-url=${BUILD_URL}" >> "$GITHUB_OUTPUT"
 
-          # Poll the build to completion (up to ~30 min).
-          for _ in $(seq 1 60); do
+          # Poll the build to completion — timeout driven by jenkins_timeout_minutes input.
+          TIMEOUT_MIN="${{ inputs.jenkins_timeout_minutes || 30 }}"
+          POLL_DEADLINE=$(( $(date +%s) + TIMEOUT_MIN * 60 ))
+          echo "Polling ${{ matrix.job }} for up to ${TIMEOUT_MIN} minutes..."
+          while [ "$(date +%s)" -lt "$POLL_DEADLINE" ]; do
             INFO=$(curl -sf -K "$CFG" "${BUILD_URL}api/json")
             BUILDING=$(echo "$INFO" | jq -r '.building')
             RESULT=$(echo "$INFO"   | jq -r '.result // "null"')
@@ -308,7 +420,33 @@ jobs:
             fi
             sleep 30
           done
-          echo "::error::Timed out waiting for ${{ matrix.job }}"; exit 1
+          echo "::error::Timed out after ${TIMEOUT_MIN} min waiting for ${{ matrix.job }}"; exit 1
+
+      - name: Write result artifact for ${{ matrix.job }}
+        if: always()
+        run: |
+          mkdir -p /tmp/jenkins-results
+          BUILD_URL="${{ steps.jenkins.outputs.build-url }}"
+          RESULT="${{ steps.jenkins.outputs.result }}"
+          JOB_NAME="${{ matrix.job }}"
+          # Fallback when skip_jenkins=true outputs are not available via expression
+          [ -z "$BUILD_URL" ] && BUILD_URL="_skipped_"
+          [ -z "$RESULT"    ] && RESULT="UNKNOWN"
+          jq -n \
+            --arg job    "$JOB_NAME" \
+            --arg result "$RESULT" \
+            --arg url    "$BUILD_URL" \
+            '{job: $job, result: $result, buildUrl: $url}' \
+            > "/tmp/jenkins-results/${JOB_NAME}.json"
+          cat "/tmp/jenkins-results/${JOB_NAME}.json"
+
+      - name: Upload result artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jenkins-result-${{ matrix.job }}
+          path: /tmp/jenkins-results/${{ matrix.job }}.json
+          retention-days: 1
 
   # ===========================================================================
   # 4) Update PR — patch the Jenkins block with real build URLs + results.
@@ -319,26 +457,47 @@ jobs:
     needs: [raise-pr, validate-integration]
     if: always() && needs.raise-pr.result == 'success'
     steps:
-      - name: Patch PR body with Jenkins build links
+      - name: Download all Jenkins result artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: jenkins-result-*
+          path: /tmp/jenkins-results
+          merge-multiple: true
+
+      - name: Patch PR body with aggregated Jenkins results
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.QTF_REVIEW_TOKEN }}
           script: |
-            const owner   = context.repo.owner, repo = context.repo.repo;
-            const prNum   = parseInt('${{ needs.raise-pr.outputs.pr-number }}');
-            const jobResult   = '${{ needs.validate-integration.outputs.result }}';
-            const buildUrl    = '${{ needs.validate-integration.outputs.build-url }}';
-            const overallPass = '${{ needs.validate-integration.result }}' === 'success';
+            const fs    = require('fs');
+            const path  = require('path');
+            const owner = context.repo.owner, repo = context.repo.repo;
+            const prNum = parseInt('${{ needs.raise-pr.outputs.pr-number }}');
 
-            const icon = overallPass ? '✅' : '❌';
-            const linkCell = buildUrl && buildUrl !== '_skipped_' && buildUrl !== ''
-              ? `[View build](${buildUrl})`
-              : buildUrl === '_skipped_' ? '_skipped (skip_jenkins=true)_' : '_unavailable_';
+            // Read all downloaded result JSON files
+            const dir = '/tmp/jenkins-results';
+            const rows = [];
+            let allPass = true;
+            if (fs.existsSync(dir)) {
+              for (const file of fs.readdirSync(dir).filter(f => f.endsWith('.json'))) {
+                const data = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
+                const icon = data.result === 'SUCCESS' ? '✅' : (data.result === 'UNKNOWN' ? '⚠️' : '❌');
+                if (data.result !== 'SUCCESS') allPass = false;
+                const linkCell = data.buildUrl && data.buildUrl !== '_skipped_' && data.buildUrl !== ''
+                  ? `[View build](${data.buildUrl})`
+                  : data.buildUrl === '_skipped_' ? '_skipped_' : '_unavailable_';
+                rows.push(`| ${data.job} | ${icon} ${data.result} | ${linkCell} |`);
+              }
+            }
+            if (rows.length === 0) {
+              rows.push('| _no results_ | ⚠️ UNKNOWN | — |');
+              allPass = false;
+            }
 
             const newBlock = [
               `| Jenkins Job | Status | Build Link |`,
               `|-------------|--------|------------|`,
-              `| CheckRegressionRunReadiness | ${icon} ${jobResult || (overallPass ? 'SUCCESS' : 'FAILED')} | ${linkCell} |`,
+              ...rows.sort()
             ].join('\n');
 
             const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNum });
@@ -348,7 +507,7 @@ jobs:
                 `<!-- JENKINS_BLOCK_START -->\n${newBlock}\n<!-- JENKINS_BLOCK_END -->`
               );
             await github.rest.pulls.update({ owner, repo, pull_number: prNum, body: updated });
-            core.info(`PR #${prNum} Jenkins block updated.`);
+            core.info(`PR #${prNum} Jenkins block updated with ${rows.length} job(s). All pass: ${allPass}`);
 
   # ===========================================================================
   # 5) Alert on failure — Teams notification + tracking issue.
@@ -577,7 +736,7 @@ jobs:
   report:
     name: "Report"
     runs-on: ubuntu-latest
-    needs: [preflight, raise-pr, validate-integration, alert-on-failure, promote]
+    needs: [preflight, sync-integration, raise-pr, validate-integration, alert-on-failure, promote]
     if: always()
     steps:
       - name: Build final status strings
@@ -586,8 +745,10 @@ jobs:
           VAL="${{ needs.validate-integration.result }}"
           PROM="${{ needs.promote.result }}"
           ALERT="${{ needs.alert-on-failure.result }}"
+          SYNC="${{ needs.sync-integration.result }}"
 
-          if   [ "$VAL"  = "success" ] && [ "$PROM" = "success" ]; then OVERALL="✅ Promoted to master"
+          if   [ "$SYNC" = "failure" ];                                  then OVERALL="⛔ Sync conflict — master could not be merged into integration"
+          elif [ "$VAL"  = "success" ] && [ "$PROM" = "success" ]; then OVERALL="✅ Promoted to master"
           elif [ "$VAL"  = "success" ] && [ "$PROM" = "skipped" ]; then OVERALL="⏭️ Validation passed — promotion skipped (dry run or no-op)"
           elif [ "$VAL"  = "failure" ]; then OVERALL="❌ Integration validation FAILED — promotion blocked"
           elif [ "$PROM" = "failure" ]; then OVERALL="⚠️ Validation passed but promotion FAILED"
@@ -595,11 +756,13 @@ jobs:
           fi
           echo "overall=${OVERALL}" >> "$GITHUB_OUTPUT"
 
-          VAL_ICON="$([ "$VAL" = "success" ] && echo ✅ || echo ❌)"
-          PROM_ICON="$([ "$PROM" = "success" ] && echo ✅ || ([ "$PROM" = "skipped" ] && echo ⏭️ || echo ❌))"
+          VAL_ICON="$([ "$VAL"   = "success" ] && echo ✅ || ([ "$VAL"   = "skipped" ] && echo ⏭️ || echo ❌))"
+          PROM_ICON="$([ "$PROM" = "success" ] && echo ✅ || ([ "$PROM"  = "skipped" ] && echo ⏭️ || echo ❌))"
+          SYNC_ICON="$([ "$SYNC" = "success" ] && echo ✅ || ([ "$SYNC"  = "skipped" ] && echo ⏭️ || echo ⛔))"
           ALERT_ICON="$([ "$ALERT" = "skipped" ] && echo — || echo 🔔)"
-          echo "val-icon=${VAL_ICON}"   >> "$GITHUB_OUTPUT"
-          echo "prom-icon=${PROM_ICON}" >> "$GITHUB_OUTPUT"
+          echo "val-icon=${VAL_ICON}"     >> "$GITHUB_OUTPUT"
+          echo "prom-icon=${PROM_ICON}"   >> "$GITHUB_OUTPUT"
+          echo "sync-icon=${SYNC_ICON}"   >> "$GITHUB_OUTPUT"
           echo "alert-icon=${ALERT_ICON}" >> "$GITHUB_OUTPUT"
 
       - name: Update PR body — final result block
@@ -631,9 +794,7 @@ jobs:
             const valResult   = '${{ needs.validate-integration.result }}';
             const promResult  = '${{ needs.promote.result }}';
             const alertResult = '${{ needs.alert-on-failure.result }}';
-            const buildUrl    = '${{ needs.validate-integration.outputs.build-url }}';
-            const buildLink   = buildUrl && buildUrl !== '_skipped_' && buildUrl !== ''
-              ? `[View build](${buildUrl})` : buildUrl || '—';
+            const syncResult  = '${{ needs.sync-integration.result }}';
 
             const comment = [
               `## 📊 Master Merge Workflow — Final Report`,
@@ -643,8 +804,9 @@ jobs:
               `| Step | Result |`,
               `|------|--------|`,
               `| Preflight | ✅ |`,
+              `| Sync integration ← master | ${{ steps.status.outputs.sync-icon }} ${syncResult} |`,
               `| Raise PR | ✅ PR #${prNum} |`,
-              `| Jenkins — CheckRegressionRunReadiness | ${{ steps.status.outputs.val-icon }} ${buildLink} |`,
+              `| Jenkins validation | ${{ steps.status.outputs.val-icon }} ${valResult} (see PR body for per-job details) |`,
               `| QTF Alert | ${{ steps.status.outputs.alert-icon }} ${alertResult} |`,
               `| Promote | ${{ steps.status.outputs.prom-icon }} ${promResult} |`,
               ``,
@@ -661,6 +823,7 @@ jobs:
             echo "| Step | Result |"
             echo "|------|--------|"
             echo "| Anything to promote | ${{ needs.preflight.outputs.should-run == 'true' && 'Yes' || 'No' }} |"
+            echo "| Sync integration ← master | ${{ needs.sync-integration.result }} |"
             echo "| Integration validation | ${{ needs.validate-integration.result }} |"
             echo "| QTF alert | ${{ needs.alert-on-failure.result }} |"
             echo "| Promotion | ${{ needs.promote.result }} |"
@@ -680,14 +843,12 @@ jobs:
           fi
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           PR_URL="${{ needs.raise-pr.outputs.pr-url }}"
-          BUILD_URL="${{ needs.validate-integration.outputs.build-url }}"
           AHEAD="${{ needs.preflight.outputs.ahead-by }}"
           PAYLOAD=$(jq -n \
-            --arg runUrl   "$RUN_URL" \
-            --arg prUrl    "$PR_URL" \
-            --arg buildUrl "$BUILD_URL" \
-            --arg ahead    "$AHEAD" \
-            --arg repo     "${{ github.repository }}" \
+            --arg runUrl "$RUN_URL" \
+            --arg prUrl  "$PR_URL" \
+            --arg ahead  "$AHEAD" \
+            --arg repo   "${{ github.repository }}" \
             '{
               "type": "message",
               "attachments": [{
@@ -704,7 +865,6 @@ jobs:
                       {"title": "Repository",       "value": $repo},
                       {"title": "Commits promoted", "value": $ahead},
                       {"title": "Promotion PR",     "value": $prUrl},
-                      {"title": "Jenkins build",    "value": $buildUrl},
                       {"title": "Workflow run",     "value": $runUrl}
                     ]}
                   ],
