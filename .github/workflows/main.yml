@@ -116,14 +116,14 @@ jobs:
   # Runs all three against `integration` in parallel. The job only succeeds if
   # every matrix leg succeeds, so `promote` is gated on all three being green.
   #
-  # FIX: Must run on 'utility-argus' (self-hosted) so the runner has network
+  # FIX: Must run on ubuntu-latest (self-hosted) so the runner has network
   # access to the internal Jenkins instance. ubuntu-latest runners are GitHub-
   # hosted and cannot reach Jenkins behind the corporate firewall/VPN, which
   # causes curl exit code 6 (Could not resolve host).
   # ===========================================================================
   validate-integration:
     name: "Validate integration — ${{ matrix.job }}"
-    runs-on: 'utility-argus'
+    runs-on: ubuntu-latest
     needs: preflight
     if: needs.preflight.outputs.should-run == 'true'
     strategy:
