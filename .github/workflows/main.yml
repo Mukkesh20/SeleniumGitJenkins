@@ -29,7 +29,7 @@ name: Master Merge Workflow
 on:
   schedule:
     # CONFIRM: cron is always UTC. Tuesday 04:00 UTC ~= 09:30 IST.
-    - cron: '28 00 * * 2'
+    - cron: 10 19 * * 2
   workflow_dispatch:
     inputs:
       dry_run:
