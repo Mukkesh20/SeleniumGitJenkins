@@ -1,0 +1,351 @@
+# =============================================================================
+# Master Merge Workflow  (merge-train.yml)
+# =============================================================================
+# The weekly integration -> master promotion train.
+#
+# SCOPE
+#   This workflow ONLY handles the scheduled Tuesday promotion of `integration`
+#   into `master`. It is the "Master Merge Workflow" boundary from the flow
+#   diagram. Everything upstream of it — PR classification, Argus review, the
+#   checklist/QTF gate, and the per-PR auto-merge onto `integration`
+#   (eligible -> automated, ineligible -> manual) — is already handled by the
+#   PR Change Detector / PR Auto-Merge / Argus workflows.
+#
+#   Emergency PRs are NOT in scope here. They target `master` directly and are
+#   merged on demand by the per-PR review/merge flow — they do not wait for
+#   this Tuesday schedule.
+#
+# WHERE THIS LIVES
+#   This file must sit on the DEFAULT branch (`master`) so the `schedule:`
+#   trigger fires. The other QTF workflows live on `integration` /
+#   `gs_gitActionWorkflow`, which is exactly why schedule/check_suite events
+#   can't run from them.
+#
+# FLOW
+#   preflight             -> is integration ahead of master? (anything to promote?)
+#   validate-integration  -> run the 3 post-merge jobs on `integration`; gate on green
+#   promote               -> raise integration->master PR; if mergeable, merge;
+#                            else HALT + alert QTF (no auto-resolve)
+#   report                -> always: summarise the run
+#
+# Master re-validation after promotion is intentionally omitted to match the
+# agreed flow: integration is validated *before* promotion, so `master` only
+# ever receives an already-green integration. To add it, see the commented
+# `validate-master` stub at the bottom.
+#
+# CONFIG YOU MUST CONFIRM (search for "CONFIRM")
+#   - Jenkins secrets: JENKINS_URL, JENKINS_USER, JENKINS_API_TOKEN
+#   - The exact Jenkins job paths + parameter names for the 3 post-merge jobs
+#   - The cron slot (currently Tuesday 04:00 UTC ~= 09:30 IST)
+#   - Merge method (currently 'merge'; switch to 'squash' if you prefer)
+# =============================================================================
+
+name: Master Merge Workflow
+
+on:
+  schedule:
+    # CONFIRM: cron is always UTC. Tuesday 04:00 UTC ~= 09:30 IST.
+    - cron: '0 4 * * 2'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Validate + check mergeability but do NOT merge to master'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  statuses: read
+
+# One train at a time. Never cancel a run mid-promotion.
+concurrency:
+  group: main-merge-workflow
+  cancel-in-progress: false
+
+env:
+  INTEGRATION_BRANCH: integration
+  MASTER_BRANCH: main
+  QTF_TEAM: qtf-team
+
+jobs:
+  # ===========================================================================
+  # 1) Preflight — is there anything to promote?
+  # ===========================================================================
+  preflight:
+    name: "Preflight — anything to promote?"
+    runs-on: ubuntu-latest
+    outputs:
+      should-run: ${{ steps.compare.outputs.should-run }}
+      ahead-by:   ${{ steps.compare.outputs.ahead-by }}
+      behind-by:  ${{ steps.compare.outputs.behind-by }}
+    steps:
+      - name: Compare integration vs master
+        id: compare
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.QTF_REVIEW_TOKEN }}
+          script: |
+            const owner = context.repo.owner, repo = context.repo.repo;
+            const base = process.env.MASTER_BRANCH;
+            const head = process.env.INTEGRATION_BRANCH;
+
+            const { data: cmp } = await github.rest.repos.compareCommitsWithBasehead({
+              owner, repo, basehead: `${base}...${head}`
+            });
+            core.info(`integration is ahead of master by ${cmp.ahead_by}, behind by ${cmp.behind_by}`);
+            core.setOutput('ahead-by', String(cmp.ahead_by));
+            core.setOutput('behind-by', String(cmp.behind_by));
+
+            if (cmp.ahead_by === 0) {
+              core.notice('Nothing to promote — integration has no new commits over master.');
+              core.setOutput('should-run', 'false');
+              return;
+            }
+            // If master is ahead of integration, an emergency merge likely diverged it.
+            // The promote job will catch the actual conflict; this is an early heads-up.
+            if (cmp.behind_by > 0) {
+              core.warning(`master is ahead of integration by ${cmp.behind_by} (likely an emergency merge) — the promotion PR may conflict.`);
+            }
+            core.setOutput('should-run', 'true');
+
+  # ===========================================================================
+  # 2) Validate integration — the three post-merge jobs (the gate)
+  # ===========================================================================
+  # Runs all three against `integration` in parallel. The job only succeeds if
+  # every matrix leg succeeds, so `promote` is gated on all three being green.
+  # ===========================================================================
+  validate-integration:
+    name: "Validate integration — ${{ matrix.job }}"
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: needs.preflight.outputs.should-run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        # CONFIRM: these must match your real Jenkins job names / paths.
+        job: [CheckRegressionReadiness, UpdateQeopsTable, AHATransferTestExecution]
+    steps:
+      - name: Trigger and wait for ${{ matrix.job }} on integration
+        env:
+          JENKINS_URL: ${{ secrets.JENKINS_URL }}
+          JENKINS_USER: ${{ secrets.JENKINS_USER }}
+          JENKINS_API_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Keep credentials OUT of the process list (no --user on the command line).
+          CFG="$(mktemp)"; chmod 600 "$CFG"
+          printf 'user = "%s:%s"\n' "$JENKINS_USER" "$JENKINS_API_TOKEN" > "$CFG"
+          trap 'rm -f "$CFG"' EXIT
+
+          CRUMB=$(curl -sf -K "$CFG" "$JENKINS_URL/crumbIssuer/api/json" | jq -r '.crumb')
+
+          # CONFIRM: job path + parameter names. Triggering against the integration branch.
+          LOC=$(curl -sf -K "$CFG" -H "Jenkins-Crumb:$CRUMB" -D - -o /dev/null \
+                  -X POST "$JENKINS_URL/job/${{ matrix.job }}/buildWithParameters?BRANCH=$INTEGRATION_BRANCH" \
+                | awk 'BEGIN{IGNORECASE=1}/^location:/{print $2}' | tr -d '\r')
+          echo "Queued: $LOC"
+
+          # Queue item -> build URL (wait up to ~10 min for an executor).
+          BUILD_URL=""
+          for _ in $(seq 1 60); do
+            BUILD_URL=$(curl -sf -K "$CFG" "${LOC}api/json" | jq -r '.executable.url // empty')
+            [ -n "$BUILD_URL" ] && break
+            sleep 10
+          done
+          [ -n "$BUILD_URL" ] || { echo "::error::Build never started for ${{ matrix.job }}"; exit 1; }
+          echo "Building: $BUILD_URL"
+
+          # Poll the build to completion (up to ~30 min — tune per job duration).
+          for _ in $(seq 1 60); do
+            INFO=$(curl -sf -K "$CFG" "${BUILD_URL}api/json")
+            BUILDING=$(echo "$INFO" | jq -r '.building')
+            RESULT=$(echo "$INFO" | jq -r '.result // "null"')
+            if [ "$BUILDING" = "false" ] && [ "$RESULT" != "null" ]; then
+              echo "${{ matrix.job }} result: $RESULT"
+              [ "$RESULT" = "SUCCESS" ] && exit 0 || exit 1
+            fi
+            sleep 30
+          done
+          echo "::error::Timed out waiting for ${{ matrix.job }}"; exit 1
+
+      # ── Alternative wait mechanism ───────────────────────────────────────
+      # If your post-merge jobs already report back to GitHub as COMMIT STATUSES
+      # on the integration head (the same pattern PR Auto-Merge reads via
+      # getCombinedStatusForRef), you can drop the Jenkins poll above and instead
+      # poll github.rest.repos.getCombinedStatusForRef for the 3 named statuses.
+
+  # ===========================================================================
+  # 2b) Alert QTF — the "Is successful? -> no" branch
+  # ===========================================================================
+  # Fires only when the post-merge jobs are NOT all green. Opens (or updates)
+  # a tracking issue tagging the QTF team so a red integration never passes
+  # silently. Promotion is blocked anyway because `promote` requires success.
+  # CONFIRM: create the `merge-train-alert` label once in the repo.
+  # ===========================================================================
+  alert-integration-failure:
+    name: "Alert QTF — integration validation failed"
+    runs-on: ubuntu-latest
+    needs: [preflight, validate-integration]
+    if: needs.preflight.outputs.should-run == 'true' && needs.validate-integration.result == 'failure'
+    steps:
+      - name: Open or update QTF alert issue
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.QTF_REVIEW_TOKEN }}
+          script: |
+            const owner = context.repo.owner, repo = context.repo.repo;
+            const qtf   = process.env.QTF_TEAM;
+            const label = 'merge-train-alert';
+            const today = new Date().toISOString().slice(0, 10);
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const body =
+              `### 🔴 Merge train — integration post-merge validation failed\n\n` +
+              `One or more post-merge jobs (CheckRegressionReadiness / UpdateQeopsTable / ` +
+              `AHA transfer test execution) failed on \`${process.env.INTEGRATION_BRANCH}\`. ` +
+              `Promotion to \`${process.env.MASTER_BRANCH}\` is blocked.\n\n` +
+              `Run: ${runUrl}\n\n@${owner}/${qtf} please triage.`;
+
+            // Reuse an open alert issue if one exists, otherwise open a new one.
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner, repo, state: 'open', labels: label
+            });
+            if (open.length) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: open[0].number, body });
+              core.notice(`Updated existing alert issue #${open[0].number}`);
+            } else {
+              const { data: issue } = await github.rest.issues.create({
+                owner, repo, labels: [label],
+                title: `Merge train: integration validation failed (${today})`, body
+              });
+              core.notice(`Opened alert issue #${issue.number}`);
+            }
+            core.setFailed('Integration post-merge validation failed — QTF alerted, promotion blocked.');
+
+  # ===========================================================================
+  # 3) Promote — Mergeable? -> Raise PR -> Merge to master
+  # ===========================================================================
+  promote:
+    name: "Promote integration -> master"
+    runs-on: ubuntu-latest
+    needs: [preflight, validate-integration]
+    if: needs.preflight.outputs.should-run == 'true' && needs.validate-integration.result == 'success'
+    steps:
+      - name: Raise / find promotion PR, verify mergeability, merge
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.QTF_REVIEW_TOKEN }}
+          script: |
+            const owner = context.repo.owner, repo = context.repo.repo;
+            const base = process.env.MASTER_BRANCH, head = process.env.INTEGRATION_BRANCH;
+            const qtf  = process.env.QTF_TEAM;
+            const dryRun = context.eventName === 'workflow_dispatch'
+                        && context.payload.inputs?.dry_run === 'true';
+
+            // Find an existing open promotion PR, or create one.
+            let pr;
+            const { data: existing } = await github.rest.pulls.list({
+              owner, repo, state: 'open', base, head: `${owner}:${head}`
+            });
+            if (existing.length) {
+              pr = existing[0];
+              core.info(`Reusing promotion PR #${pr.number}`);
+            } else {
+              const today = new Date().toISOString().slice(0, 10);
+              const { data: created } = await github.rest.pulls.create({
+                owner, repo, base, head,
+                title: `Weekly merge train: ${head} -> ${base} (${today})`,
+                body: 'Automated weekly promotion. Integration validated green by the post-merge jobs.'
+              });
+              pr = created;
+              core.info(`Created promotion PR #${pr.number}`);
+            }
+
+            // GitHub computes mergeability asynchronously — poll until known.
+            let mergeable = pr.mergeable, state = pr.mergeable_state;
+            for (let i = 0; i < 12 && (mergeable === null || state === 'unknown'); i++) {
+              await new Promise(r => setTimeout(r, 5000));
+              const { data: p } = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
+              mergeable = p.mergeable; state = p.mergeable_state;
+            }
+            core.info(`PR #${pr.number} mergeable=${mergeable} state=${state}`);
+
+            // ── Conflict / divergence off-ramp — HALT + alert, never auto-resolve ──
+            if (mergeable === false || state === 'dirty') {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: pr.number,
+                body: `### ⛔ Merge train halted — integration is not mergeable to master\n\n` +
+                      `\`${head}\` cannot be merged cleanly into \`${base}\` (an emergency merge likely diverged master). ` +
+                      `Conflicts are resolved manually — the train does not auto-resolve.\n\n` +
+                      `@${owner}/${qtf} please sync and resolve.`
+              });
+              try {
+                await github.rest.pulls.requestReviewers({
+                  owner, repo, pull_number: pr.number, team_reviewers: [qtf]
+                });
+              } catch (e) { core.warning(`Could not request QTF review: ${e.message}`); }
+              core.setFailed('Promotion PR not mergeable — halted and alerted QTF team.');
+              return;
+            }
+
+            if (dryRun) {
+              core.notice(`Dry run — PR #${pr.number} is mergeable (${state}); not merging.`);
+              return;
+            }
+
+            // ── Merge. 'merge' preserves integration history; use 'squash' if preferred. ──
+            try {
+              const { data: res } = await github.rest.pulls.merge({
+                owner, repo, pull_number: pr.number, merge_method: 'merge',
+                commit_title: `Weekly merge train: ${head} -> ${base} (#${pr.number})`
+              });
+              core.notice(`Promoted to ${base}. Merge SHA ${res.sha.substring(0, 7)}.`);
+            } catch (e) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: pr.number,
+                body: `### ⚠️ Merge train — promotion merge failed\n\n> ${e.message}\n\n@${owner}/${qtf} please investigate.`
+              });
+              core.setFailed(`Merge failed: ${e.message}`);
+            }
+
+  # ===========================================================================
+  # 4) Report — always summarise the run
+  # ===========================================================================
+  report:
+    name: "Report"
+    runs-on: ubuntu-latest
+    needs: [preflight, validate-integration, alert-integration-failure, promote]
+    if: always()
+    steps:
+      - name: Summarise run
+        run: |
+          {
+            echo "## Master Merge Workflow — run summary"
+            echo "- Anything to promote: ${{ needs.preflight.outputs.should-run == 'true' && 'yes' || 'no (integration not ahead of master)' }}"
+            echo "- Integration validation: ${{ needs.validate-integration.result }}"
+            echo "- QTF alert raised: ${{ needs.alert-integration-failure.result != 'skipped' && 'yes' || 'no' }}"
+            echo "- Promotion: ${{ needs.promote.result }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+# =============================================================================
+# OPTIONAL — post-promotion master re-validation + revert
+# =============================================================================
+# Omitted by default (integration is validated before promotion). Uncomment and
+# wire if you want belt-and-suspenders validation of master after the merge.
+#
+#  validate-master:
+#    name: "Validate master — ${{ matrix.job }}"
+#    runs-on: ubuntu-latest
+#    needs: promote
+#    if: needs.promote.result == 'success'
+#    strategy:
+#      fail-fast: false
+#      matrix:
+#        job: [CheckRegressionReadiness, UpdateQeopsTable, AHATransferTestExecution]
+#    steps:
+#      - name: Trigger and wait for ${{ matrix.job }} on master
+#        run: |  # same Jenkins trigger/poll as validate-integration, BRANCH=$MASTER_BRANCH
+#          : # ... and on failure: alert QTF + open a revert PR of the merge commit.
+# =============================================================================
