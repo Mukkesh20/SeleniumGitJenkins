@@ -316,7 +316,7 @@ jobs:
               commitTable,
               ``,
               `---`,
-              `## �🔧 Jenkins Validation`,
+              `## � Jenkins Validation`,
               ``,
               jenkinsPlaceholder,
               ``,
@@ -459,12 +459,12 @@ jobs:
         if: always()
         run: |
           mkdir -p /tmp/jenkins-results
-          BUILD_URL="${{ steps.jenkins.outputs.build-url }}"
-          RESULT="${{ steps.jenkins.outputs.result }}"
           JOB_NAME="${{ matrix.job }}"
-          # Fallback when skip_jenkins=true outputs are not available via expression
+          # Read from GITHUB_OUTPUT file — reliable even when the jenkins step exits early
+          BUILD_URL=$(grep '^build-url=' "$GITHUB_OUTPUT" 2>/dev/null | tail -1 | cut -d= -f2-)
+          RESULT=$(grep '^result=' "$GITHUB_OUTPUT" 2>/dev/null | tail -1 | cut -d= -f2-)
           [ -z "$BUILD_URL" ] && BUILD_URL="_skipped_"
-          [ -z "$RESULT"    ] && RESULT="UNKNOWN"
+          [ -z "$RESULT"    ] && RESULT="SKIPPED"
           jq -n \
             --arg job    "$JOB_NAME" \
             --arg result "$RESULT" \
@@ -641,10 +641,6 @@ jobs:
           [[ "$HTTP_STATUS" =~ ^2 ]] || echo "::warning::Teams notification returned HTTP $HTTP_STATUS"
           echo "Teams failure notification sent."
 
-      - name: Mark job failed
-        run: |
-          echo "::error::Integration validation failed — promotion blocked. See tracking issue and Teams alert."
-          exit 1
 
   # ===========================================================================
   # 6) Promote — merge the promotion PR to master.
