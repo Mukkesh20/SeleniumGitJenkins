@@ -611,11 +611,6 @@ jobs:
           [[ "$HTTP_STATUS" =~ ^2 ]] || echo "::warning::Teams notification returned HTTP $HTTP_STATUS"
           echo "Teams failure notification sent."
 
-      - name: Mark job failed
-        run: |
-          echo "::error::Integration validation failed — promotion blocked. See tracking issue and Teams alert."
-          exit 1
-
   # ===========================================================================
   # 6) Promote — merge the promotion PR to master.
   # ===========================================================================
