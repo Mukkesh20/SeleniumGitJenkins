@@ -125,7 +125,7 @@ jobs:
       fail-fast: false
       matrix:
         # CONFIRM: these must match your real Jenkins job names / paths.
-        job: [CheckRegressionReadiness]
+        job: [CheckRegressionRunReadiness]
     steps:
       - name: Trigger and wait for ${{ matrix.job }} on integration
         env:
@@ -203,7 +203,7 @@ jobs:
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
             const body =
               `### 🔴 Merge train — integration post-merge validation failed\n\n` +
-              `One or more post-merge jobs (CheckRegressionReadiness / UpdateQeopsTable / ` +
+              `One or more post-merge jobs (CheckRegressionRunReadiness / UpdateQeopsTable / ` +
               `AHA transfer test execution) failed on \`${process.env.INTEGRATION_BRANCH}\`. ` +
               `Promotion to \`${process.env.MASTER_BRANCH}\` is blocked.\n\n` +
               `Run: ${runUrl}\n\n@${owner}/${qtf} please triage.`;
@@ -343,7 +343,7 @@ jobs:
 #    strategy:
 #      fail-fast: false
 #      matrix:
-#        job: [CheckRegressionReadiness, UpdateQeopsTable, AHATransferTestExecution]
+#        job: [CheckRegressionRunReadiness, UpdateQeopsTable, AHATransferTestExecution]
 #    steps:
 #      - name: Trigger and wait for ${{ matrix.job }} on master
 #        run: |  # same Jenkins trigger/poll as validate-integration, BRANCH=$MASTER_BRANCH
