@@ -24,7 +24,7 @@ public class class4 {
 		System.out.println("beforeMethod executed now");
 	}
 	@Test 
-	@Step("Step")
+	@Stdep("Step")
 
 	public void test1() {
 		System.out.println("test41 executed");
