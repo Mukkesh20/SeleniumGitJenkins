@@ -27,7 +27,7 @@ public class class2 {
 	@Story("Story")
 
 	public void test1() {
-		System.out.println("test21 executed");
+		System.out.println("test21 wfwefwfweg executed");
 	}
 	
 	@Test 
