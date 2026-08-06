@@ -42,6 +42,11 @@ public class class3 {
 	public void test3() {
 		System.out.println("test33 executed");
 	}
+
+	@Test 
+	public void test4() {
+		System.out.println("test33 executed");
+	}
 	
 	@AfterMethod
 	public void afterClass3() {
